@@ -1,0 +1,12 @@
+[project]
+name = "londonopen"
+version = "0.1.0"
+description = "A Python-based automated trading analysis tool for MetaTrader 5, specializing in forex trading strategies around the London market opening."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "MetaTrader5",
+    "pandas",
+    "numpy",
+    "pytz"
+]
