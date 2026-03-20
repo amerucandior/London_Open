@@ -162,7 +162,7 @@ def liquidity_zones(
 
         zones.append(
             {
-                "zone": round((high, low) / 2, 5),
+                "zone": round((high + low) / 2, 5),
                 "type": "cluster",
                 "touches": len(inside),
                 "avg_wick": np.nan,
@@ -220,14 +220,14 @@ def detect_price_spikes(
         # Clear window to ensure move is not counted twice
         window.clear
 
-    return pd.Dataframe(spikes)
+    return pd.DataFrame(spikes)
 
 
 # Attach volume information to each spike
 def add_volume_to_spikes(
     df: pd.DataFrame,
     spikes: pd.DataFrame,
-    vol_factor: int=3.0
+    vol_factor: int=3
     ) -> pd.DataFrame:
     """
     For every spike we compute the total executed volume (`size`) that took
@@ -272,7 +272,7 @@ def detect_liquidity_sweeps(
     min_touches: int=3,
     max_seconds: int=5,
     min_pips: float=15,
-    vol_factor: float=3,
+    vol_factor: int=3,
 ) -> pd.DataFrame:
     """
     High-evel wrapper:

@@ -11,7 +11,7 @@ class Overextension:
         self.threshold_pips = threshold_pips
         self.ema_calculator = None
 
-    def calculate_ema(self, prices: pd.series) -> pd.series:
+    def calculate_ema(self, prices: pd.Series) -> pd.Series:
         """calculate EMA with proper pandas method"""
         return prices.ewm(span=self.ema_period, adjust=False).mean()
 

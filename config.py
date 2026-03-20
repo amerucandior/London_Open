@@ -6,6 +6,4 @@ config = {
 
     "trade_limits": {},
     "spread_limits": {},
-
-
 }
