@@ -4,7 +4,6 @@ import logging
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
-from pathlib import Path
 from typing import Optional
 
 log = logging.getLogger(__name__)
