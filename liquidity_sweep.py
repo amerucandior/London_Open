@@ -200,7 +200,7 @@ def detect_price_spikes(
 
         # Discard rows that are older than 'max_seconds'
         while window and (ts - window[0][0]).total_seconds()> max_seconds:
-            window.popleft
+            window.popleft()
 
     # Compare newest price with the oldest price in the window 
     start_ts, start_price = window[0]
@@ -218,7 +218,7 @@ def detect_price_spikes(
             }
         )
         # Clear window to ensure move is not counted twice
-        window.clear
+        window.clear()
 
     return pd.DataFrame(spikes)
 
@@ -232,7 +232,7 @@ def add_volume_to_spikes(
     """
     For every spike we compute the total executed volume (`size`) that took
     place between its start and end timestamps.
-    If that total exceeds `vol_factor` × the **global median** volume,
+    If that total exceeds `vol_factor` x the **global median** volume,
     the spike is kept; otherwise it is dropped.
     """
 
@@ -240,7 +240,7 @@ def add_volume_to_spikes(
         return spikes
 
     # cumulative volume series – O(1) interval queries
-    df['col_vol'] = df['size'].cumsum()
+    df['cum_vol'] = df['size'].cumsum()
 
     # Overall median volume
     median_vol = df['size'].rolling(window=200, min_periods=1).median() #rolling median volume
@@ -248,7 +248,7 @@ def add_volume_to_spikes(
 
     # Compute volume per spike
     vol = []
-    for _, sp in spikes.iterows():
+    for _, sp in spikes.iterrows():
         # locate rows between start_ts and end_ts (binary search via index)
         start_idx = df.index.get_loc(sp['start_ts'])
         end_idx = df.index.get_loc(sp['end_ts'])

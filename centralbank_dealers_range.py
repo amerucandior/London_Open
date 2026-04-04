@@ -44,7 +44,7 @@ def cbdr_range(
 
     # ------- Convert to New York Time --------
     ny_tz = pytz.timezone("America/New_York")
-    df["ny_tz"] = df["time"].dt.tz_convert(ny_tz)
+    df["ny_time"] = df["time"].dt.tz_convert(ny_tz)
 
     # ----- Isolate the 14:00 - 20:00 NY window -----
     start_ny = time(14, 0) # 2pm
@@ -65,15 +65,15 @@ def cbdr_range(
 
     else:
         # Body only: max(open, close) and min(open, close)
-        window["body_high"] = window[["open"], ["close"]].max(axis=1)
-        window["body_low"] = window[["open"], ["close"]].min(axis=1)
+        window["body_high"] = window["open", "close"].max(axis=1)
+        window["body_low"] = window["open", "close"].min(axis=1)
 
     cbdr_high = window["body_high"].max()
     cbdr_low = window["body_low"].min()
 
     # Convert range to pips
-    pip = mt5.symbol_info(symbol)
-    cbdr_range_pips = (cbdr_high - cbdr_low) / pip
+    pip_size = mt5.symbol_info(symbol).point
+    cbdr_range_pips = (cbdr_high - cbdr_low) / pip_size
 
     within_ideal_range = ideal_min <= cbdr_range_pips <= ideal_max
     within_max = cbdr_range_pips <= max_allowed
@@ -85,8 +85,8 @@ def cbdr_range(
     std4 = 4 * std1
 
     # ----- Projected High -----
-    proj_high = cbdr_high + 3 * std1 * pip
-    proj_low = cbdr_low - 3 * std1 * pip
+    proj_high = cbdr_high + 3 * std1 * pip_size
+    proj_low = cbdr_low - 3 * std1 * pip_size
 
     # -------- BIAS logic ---------
 
@@ -96,7 +96,7 @@ def cbdr_range(
 
     # assemble result
     result = {
-        "date": window["ny_time"].dt.date.iloc[0].isformat(),
+        "date": window["ny_time"].dt.date.iloc[0].isoformat(),
         "cbdr_high": cbdr_high,
         "cbdr_low": cbdr_low,
         "cbdr_range_pips": round(cbdr_range_pips, 2),

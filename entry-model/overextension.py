@@ -18,7 +18,7 @@ class Overextension:
     def calculate_stretch_pips(self, current_price: float, ema_value: float, pip_factor: float = 10000.0) -> float:
         """
         calculates stretch distance in pips 
-        pip factor: 1000 for EURUSD
+        pip factor: 10000 for EURUSD
         """
         return abs(current_price - ema_value) * pip_factor
 
@@ -26,35 +26,43 @@ class Overextension:
         """checks if stretch is beyond threshold"""
         return stretch_pips >= self.threshold_pips
 
-    def calculate_factor(self, 
-                    df: pd.DataFrame, 
-                    price_col: str = 'close',
-                    timestamp_col: str = 'timestamp') -> pd.Series:
+    def calculate_factor(
+        self,
+        df: pd.DataFrame,
+        price_col: str = "close",
+        timestamp_col: str = "timestamp",
+    ) -> pd.Series:
         """
-        Calculate overextension factor for entire series
-        Returns: Boolean series indicating overextension condition
+        Vectorised computation of the over-extension flag.
+        Returns a Boolean Series whose index matches ``df`` (or the timestamp column
+        if it exists).
         """
-        #validate input
+        # ---- validation -------------------------------------------------------
         if price_col not in df.columns:
             raise ValueError(f"Price column '{price_col}' not in dataframe")
 
-        #calculate EMA
+        # ---- EMA ------
         ema_series = self.calculate_ema(df[price_col])
 
-        #calculate stretch in pips 
-        stretch_pips = self.calculate_stretch_pips(
-            df[price_col].values,
-            ema_series.values,
-            pip_factor=1000.0
-        )
+        # ---- stretch in pips ------------
+        #   (price – EMA).abs() gives a Series; multiply by the pip factor
+        stretch_pips = (df[price_col] - ema_series).abs() * 10000.0   # ← inline, no .values
+        #   docs: Series.abs() returns element‑wise absolute values【13†L2-L9】
 
-        #create result series
-        result = pd.Series(
-            self.is_overextended(stretch_pips),
-            index = df.index if timestamp_col not in df.columns else df[timestamp_col]
-        )
+        # ---- over‑extension flag – element‑wise comparison --------------------
+        overextended = stretch_pips.ge(self.threshold_pips)          # same as >=
+        #   docs: Series.ge() is the element‑wise >= operator【14†L70-L74】
 
-        return result
+        # ---- optional timestamp index -----------------------------------------
+        if timestamp_col in df.columns:
+            # Preserve the original order but replace the index with the timestamp column
+            overextended = overextended.set_axis(df[timestamp_col])
+            # If you want the column to become the *real* index you could also do:
+            # overextended = overextended.set_index(df[timestamp_col])
+        # otherwise the index is already df.index
+
+        return overextended
+
 
     def calculate_single_point(self, current_price: float, ema_value: float) -> dict:
         """calculate factor for a single point"""
