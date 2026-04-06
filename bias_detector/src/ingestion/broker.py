@@ -21,7 +21,12 @@ class OHLCVBar(BaseModel):
 def fetch_ohlcv(pair: str, period: str = "2y") -> pd.DataFrame:
     def _pull():
         import yfinance as yf
-        raw = yf.download(pair, period=period, interval="1d", progress=False)
+        try:
+            raw = yf.download(pair, period=period, interval="1d", progress=False)
+        except Exception as e:
+            raise ValueError(f"Failed to download data for {pair}: {e}")
+        if not isinstance(raw, pd.DataFrame) or raw.empty:
+            raise ValueError(f"No data found for {pair}")
         raw.columns = [c.lower() for c in raw.columns]
         # Validate every row through Pydantic — drops corrupt bars
         valid_rows = []

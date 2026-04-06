@@ -47,6 +47,7 @@ executing==2.2.1
 fastapi==0.117.1
 fastapi-cli==0.0.24
 fonttools==4.62.1
+fredapi==0.5.2
 frozendict==2.4.7
 fsspec==2026.2.0
 googleapis-common-protos==1.73.0

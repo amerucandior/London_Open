@@ -50,16 +50,17 @@ def fx_bias_detector():
 
     @task
     def compute_features_task(ohlcv, cal, cot):
-        # TaskFlow automatically handles dependencies if you pass return values
-        return run_features()
+        # The **only** thing this wrapper does is delegate to the real worker
+        # and let Airflow capture the returned dict (or DataFrame, etc.).
+        return run_features(ohlcv=ohlcv, cal=cal, cot=cot)
 
     @task
     def scoring_task(features):
-        return run_scoring()
+        return run_scoring(features=features)
 
     @task
     def publish_task(score):
-        return emit_all()
+        return emit_all(score=score)
 
     # Define execution flow via function calls
     ohlcv_data = ingest_ohlcv_task("EURUSD=X")
