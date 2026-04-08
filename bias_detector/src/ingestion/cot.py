@@ -60,7 +60,7 @@ log = structlog.get_logger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-CFTC_BASE_URL  = "https://www.cftc.gov/dea/futures/financial_lf.html"
+CFTC_BASE_URL  = "https://www.cftc.gov/files/dea/history/fut_fin_xls_{year}.zip"
 OUTPUT_DIR     = Path(os.getenv("DATA_DIR", "data/raw/cot"))
 
 # Contract names as they appear in the CFTC CSV (partial match, case-insensitive)
@@ -69,21 +69,40 @@ CONTRACT_MAP: dict[str, str] = {
     "GBPUSD": "BRITISH POUND",
 }
 
-# CFTC CSV column aliases (the file uses verbose headers)
+# CFTC CSV column aliases
 # Maps our clean name → possible raw CFTC column names
 _COL_ALIASES: dict[str, list[str]] = {
-    "report_date":           ["As of Date in Form YYYY-MM-DD", "Report_Date_as_YYYY-MM-DD"],
-    "contract_name":         ["Market and Exchange Names", "Market_and_Exchange_Names"],
-    "open_interest":         ["Open Interest (All)", "Open_Interest_All"],
-    "nc_long":               ["NonComm Positions Long (All)", "NonComm_Positions_Long_All"],
-    "nc_short":              ["NonComm Positions Short (All)", "NonComm_Positions_Short_All"],
-    "nc_spread":             ["NonComm Positions Spread (All)", "NonComm_Positions_Spread_All"],
-    "comm_long":             ["Comm Positions Long (All)", "Comm_Positions_Long_All"],
-    "comm_short":            ["Comm Positions Short (All)", "Comm_Positions_Short_All"],
-    "change_nc_long":        ["Change in NonComm Long (All)", "Change_in_NonComm_Long_All"],
-    "change_nc_short":       ["Change in NonComm Short (All)", "Change_in_NonComm_Short_All"],
-    "change_oi":             ["Change in Open Interest (All)", "Change_in_Open_Interest_All"],
+    "report_date": ["As_of_Date_In_Form_YYMMDD", "As of Date in Form YYMMDD"],
+    "contract_name": ["Market_and_Exchange_Names", "Market and Exchange Names"],
+    "open_interest": ["Open_Interest_All", "Open Interest (All)"],
+    
+    # Disaggregated categories (the ones that matter)
+    "dealer_long": ["Dealer_Positions_Long_All", "Dealer Positions Long (All)"],
+    "dealer_short": ["Dealer_Positions_Short_All", "Dealer Positions Short (All)"],
+    "dealer_spread": ["Dealer_Positions_Spread_All", "Dealer Positions Spread (All)"],
+    
+    "asset_mgr_long": ["Asset_Mgr_Positions_Long_All", "Asset Manager Positions Long (All)"],
+    "asset_mgr_short": ["Asset_Mgr_Positions_Short_All", "Asset Manager Positions Short (All)"],
+    "asset_mgr_spread": ["Asset_Mgr_Positions_Spread_All", "Asset Manager Positions Spread (All)"],
+    
+    "lev_money_long": ["Lev_Money_Positions_Long_All", "Leveraged Money Positions Long (All)"],
+    "lev_money_short": ["Lev_Money_Positions_Short_All", "Leveraged Money Positions Short (All)"],
+    "lev_money_spread": ["Lev_Money_Positions_Spread_All", "Leveraged Money Positions Spread (All)"],
+    
+    # Changes
+    "change_dealer_long": ["Change_in_Dealer_Long_All", "Change in Dealer Long (All)"],
+    "change_dealer_short": ["Change_in_Dealer_Short_All", "Change in Dealer Short (All)"],
+    "change_asset_mgr_long": ["Change_in_Asset_Mgr_Long_All", "Change in Asset Manager Long (All)"],
+    "change_asset_mgr_short": ["Change_in_Asset_Mgr_Short_All", "Change in Asset Manager Short (All)"],
+    "change_lev_money_long": ["Change_in_Lev_Money_Long_All", "Change in Lev Money Long (All)"],
+    "change_lev_money_short": ["Change_in_Lev_Money_Short_All", "Change in Lev Money Short (All)"],
+    "change_oi": ["Change_in_Open_Interest_All", "Change in Open Interest (All)"],
+    
+    # Concentration (valuable) used for risk management when top traders have large positions
+    "conc_gross_4_long": ["Conc_Gross_LE_4_TDR_Long_All", "Concentration Gross Long 4 TDR"],
+    "conc_gross_4_short": ["Conc_Gross_LE_4_TDR_Short_All", "Concentration Gross Short 4 TDR"],
 }
+
 
 # Days before we flag COT data as stale
 STALE_THRESHOLD_DAYS = 10
@@ -97,24 +116,39 @@ ZSCORE_WINDOW = 52
 class COTRecord(BaseModel):
     """Single weekly COT record for one contract."""
 
-    report_date:    str
-    pair:           str
-    contract_name:  str
-    open_interest:  int
-    nc_long:        int
-    nc_short:       int
-    nc_spread:      int
-    comm_long:      int
-    comm_short:     int
-    change_nc_long: int
-    change_nc_short: int
-    change_oi:      int
+    report_date:            str
+    pair:                   str
+    contract_name:          str
+    open_interest:          int
+    # dealers
+    dealer_long:            int
+    dealer_short:           int
+    dealer_spread:          int
+    # aum
+    asset_mgr_long:         int
+    asset_mgr_short:        int
+    asset_mgr_spread:       int
+    # hedge funds
+    lev_money_long:         int
+    lev_money_short:        int
+    lev_money_spread:       int
+    # changes
+    change_dealer_long:     int
+    change_dealer_short:    int
+    change_asset_mgr_long:  int
+    change_asset_mgr_short: int
+    change_lev_money_long:  int
+    change_lev_money_short: int
+    change_oi:              int
 
-    # Derived fields (populated post-construction)
-    nc_net:        int   = 0
-    nc_net_change: int   = 0
-    cot_index:     float = 0.0   # net / OI, range [-1, +1]
-    quality_flag:  int   = 0     # 0=good, 1=partial, 2=stale
+    # Derived
+    dealer_net: int = 0
+    asset_mgr_net: int = 0
+    lev_money_net: int = 0
+    
+    # The classic "Smart Money vs Dumb Money" spread
+    smart_money_index: float = 0.0  # dealer_net / OI (z-scored later)
+    speculative_pressure: float = 0.0  # asset_mgr_net / OI
 
     @field_validator("open_interest", "nc_long", "nc_short", mode="before")
     @classmethod
@@ -131,13 +165,15 @@ class COTRecord(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def compute_derived(self) -> "COTRecord":
-        self.nc_net        = self.nc_long - self.nc_short
-        self.nc_net_change = self.change_nc_long - self.change_nc_short
+    def compute_derived(self):
+        self.dealer_net = self.dealer_long - self.dealer_short
+        self.asset_mgr_net = self.asset_mgr_long - self.asset_mgr_short
+        self.lev_money_net = self.lev_money_long - self.lev_money_short
+        
         if self.open_interest > 0:
-            self.cot_index = round(self.nc_net / self.open_interest, 6)
+            self.smart_money_index = self.dealer_net / self.open_interest
+            self.speculative_pressure = self.asset_mgr_net / self.open_interest
         return self
-
 
 # ── Retry decorator ───────────────────────────────────────────────────────────
 
@@ -160,7 +196,7 @@ _SESSION.headers.update({
 @_RETRY
 def _download_cftc_zip(year: int) -> bytes:
     """Download and return raw ZIP bytes for a given year."""
-    url = f"{CFTC_BASE_URL}/fut_fin_xls_{year}.zip"
+    url = CFTC_BASE_URL.format(year=year)
     log.info("cot.cftc.download", url=url, year=year)
     resp = _SESSION.get(url, timeout=60, stream=True)
     resp.raise_for_status()
@@ -241,60 +277,85 @@ def _filter_contracts(df: pd.DataFrame, pair: str) -> pd.DataFrame:
     return filtered
 
 
-# ── Z-score enrichment ────────────────────────────────────────────────────────
-
-def _add_zscore(df: pd.DataFrame, window: int = ZSCORE_WINDOW) -> pd.DataFrame:
-    """
-    Add a z-scored COT net position column over a rolling window.
-    z_score = (nc_net - rolling_mean) / rolling_std
-
-    This is Feature F3 in the bias detector.
-    """
-    df = df.sort_values("report_date").copy()
-    df["nc_net_rolling_mean"] = df["nc_net"].rolling(window, min_periods=4).mean()
-    df["nc_net_rolling_std"]  = df["nc_net"].rolling(window, min_periods=4).std()
-    df["cot_z_score"] = (
-        (df["nc_net"] - df["nc_net_rolling_mean"])
-        / df["nc_net_rolling_std"].replace(0, float("nan"))
-    ).round(4)
-    df["cot_z_score"] = df["cot_z_score"].clip(-4, 4)  # cap extremes
-    return df
-
-
 # ── Staleness check ───────────────────────────────────────────────────────────
-
-def _check_staleness(df: pd.DataFrame) -> pd.DataFrame:
-    """Flag rows where the report date is more than STALE_THRESHOLD_DAYS old."""
-    now = datetime.now(timezone.utc).date()
-    df["report_date_dt"] = pd.to_datetime(df["report_date"], errors="coerce")
-    df["days_old"] = (now - df["report_date_dt"].dt.date).apply(
-        lambda d: d.days if pd.notna(d) else 999
+def _check_staleness(
+    df: pd.DataFrame, 
+    threshold: int = 10) -> pd.DataFrame:
+    """
+    Flag rows where the report date is older than the most recent COT release.
+    
+    CFTC reports are as of Tuesday, released Friday ~15:30 ET.
+    We measure staleness as days between the report's as-of date and the 
+    most recent Tuesday (when fresh data should have been released).
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain 'report_date' column (string or datetime)
+    threshold : int
+        Days after which data is flagged as stale (default: 10)
+        
+    Returns
+    -------
+    pd.DataFrame
+        Copy with added columns:
+        - 'days_old': Days since last Tuesday
+        - 'quality_flag': 0=fresh, 1=warning(>threshold), 2=stale(>threshold+7)
+    """
+    df = df.copy()
+    
+    # Calculate most recent Tuesday (CFTC reporting date)
+    today = datetime.now(timezone.utc).date()
+    days_since_tuesday = (today.weekday() - 1) % 7  # Tuesday = 1
+    last_tuesday = today - timedelta(days=days_since_tuesday)
+    
+    # Calculate age of each record relative to reporting cycle
+    report_dates = pd.to_datetime(df["report_date"]).dt.date
+    
+    # Handle timezone-aware vs naive comparisons
+    df["days_old"] = (last_tuesday - report_dates).apply(
+        lambda d: d.days if hasattr(d, 'days') else (last_tuesday - d).days
     )
+    
+    # Quality flag: 0=fresh, 1=warning, 2=stale
     df["quality_flag"] = df["days_old"].apply(
-        lambda d: 2 if d > STALE_THRESHOLD_DAYS else 0
+        lambda d: 0 if d <= threshold else (2 if d > (threshold + 7) else 1)
     )
-    if (df["quality_flag"] == 2).any():
-        max_days = df["days_old"].max()
-        log.warning("cot.stale_data", max_days_old=int(max_days))
+    
+    # Logging
+    stale_count = (df["quality_flag"] > 0).sum()
+    if stale_count > 0:
+        max_days = int(df["days_old"].max())
+        avg_days = float(df["days_old"].mean())
+        log.warning(
+            "cot.stale_data_detected",
+            stale_records=int(stale_count),
+            max_days_old=max_days,
+            avg_days_old=round(avg_days, 1),
+            threshold=threshold,
+            reference_tuesday=str(last_tuesday)
+        )
+    
     return df
+
 
 
 # ── Cache layer ───────────────────────────────────────────────────────────────
 
-def _cache_path(pair: str, year: int) -> Path:
+def _cache_path(pair: str, year: int, lookback_years: int) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    return OUTPUT_DIR / f"cot_{pair.upper()}_{year}.parquet"
+    return OUTPUT_DIR / f"cot_{pair.upper()}_{year}_lb{lookback_years}.parquet"
 
 
-def _save_parquet(df: pd.DataFrame, pair: str, year: int) -> Path:
-    path = _cache_path(pair, year)
+def _save_parquet(df: pd.DataFrame, pair: str, year: int, lookback_years: int) -> Path:
+    path = _cache_path(pair, year, lookback_years)
     df.to_parquet(path, index=False, compression="snappy")
     log.info("cot.cache.saved", path=str(path), rows=len(df))
     return path
 
 
-def _load_cached(pair: str, year: int) -> Optional[pd.DataFrame]:
-    path = _cache_path(pair, year)
+def _load_cached(pair: str, year: int, lookback_years: int) -> Optional[pd.DataFrame]:
+    path = _cache_path(pair, year, lookback_years)
     if not path.exists():
         return None
     age_hours = (datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)).total_seconds() / 3600
@@ -333,7 +394,6 @@ def _load_years(years: list[int]) -> pd.DataFrame:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
-
 def fetch_cot(
     pair: str = "EURUSD",
     lookback_years: int = 2,
@@ -344,19 +404,25 @@ def fetch_cot(
 
     Parameters
     ----------
-    pair            : "EURUSD" or "GBPUSD"
-    lookback_years  : How many years of history to load (min 1, max 5)
-    use_cache       : Return cached Parquet if available and fresh (<6 days)
+    pair            : str
+        "EURUSD" or "GBPUSD"
+    lookback_years  : int
+        How many years of history to load (min 1, max 5)
+    use_cache       : bool
+        Return cached Parquet if available and fresh (<6 days)
 
     Returns
     -------
-    pd.DataFrame with columns:
-        report_date, pair, contract_name,
-        open_interest, nc_long, nc_short, nc_spread,
-        comm_long, comm_short,
-        change_nc_long, change_nc_short, change_oi,
-        nc_net, nc_net_change, cot_index,
-        cot_z_score, days_old, quality_flag
+    pd.DataFrame with columns including:
+        report_date, pair, contract_name, open_interest,
+        dealer_long, dealer_short, dealer_spread, dealer_net, dealer_net_pct,
+        asset_mgr_long, asset_mgr_short, asset_mgr_net, asset_mgr_net_pct,
+        lev_money_long, lev_money_short, lev_money_net, lev_money_net_pct,
+        change_dealer_long, change_dealer_short, ... change_oi,
+        cci, cci_z,                           # Composite index (z-scored)
+        conc_risk, is_high_conc,              # Concentration metrics
+        is_roll_week, is_roll_transition,     # Roll detection
+        days_old, quality_flag                # Data freshness
     """
     pair = pair.upper()
     if pair not in CONTRACT_MAP:
@@ -365,16 +431,20 @@ def fetch_cot(
     current_year = datetime.now().year
     years = list(range(current_year - lookback_years + 1, current_year + 1))
 
-    # ── Cache check (current year only) ──────────────────────────────────────
+    # ── Cache check (includes lookback_years in key) ────────────────────────
     if use_cache:
-        cached = _load_cached(pair, current_year)
+        cached = _load_cached(pair, current_year, lookback_years)
         if cached is not None:
-            return cached
+            # Verify schema compatibility - regenerate if columns mismatch
+            required_new_cols = ["dealer_net", "cci_z", "is_roll_week"]
+            if all(col in cached.columns for col in required_new_cols):
+                return cached
+            log.info("cot.cache.schema_mismatch", pair=pair, year=current_year)
 
     # ── Download from CFTC ────────────────────────────────────────────────────
     raw_combined = _load_years(years)
 
-    # ── Normalise columns ─────────────────────────────────────────────────────
+    # ── Normalise columns (now maps to Disaggregated schema) ──────────────────
     raw_combined = _normalise_columns(raw_combined)
 
     # ── Filter to target contract ─────────────────────────────────────────────
@@ -383,27 +453,40 @@ def fetch_cot(
         log.error("cot.no_data_for_pair", pair=pair)
         return pd.DataFrame()
 
-    # ── Validate rows through Pydantic ────────────────────────────────────────
+    # ── Validate rows through Pydantic (Disaggregated fields) ───────────────────
     records: list[COTRecord] = []
     for _, row in filtered.iterrows():
         try:
             rec = COTRecord(
-                report_date     = str(row.get("report_date", "")),
-                pair            = pair,
-                contract_name   = str(row.get("contract_name", "")),
-                open_interest   = row.get("open_interest",   0),
-                nc_long         = row.get("nc_long",         0),
-                nc_short        = row.get("nc_short",        0),
-                nc_spread       = row.get("nc_spread",       0),
-                comm_long       = row.get("comm_long",       0),
-                comm_short      = row.get("comm_short",      0),
-                change_nc_long  = row.get("change_nc_long",  0),
-                change_nc_short = row.get("change_nc_short", 0),
-                change_oi       = row.get("change_oi",       0),
+                report_date             = str(row.get("report_date", "")),
+                pair                    = pair,
+                contract_name           = str(row.get("contract_name", "")),
+                open_interest           = row.get("open_interest", 0),
+                # Disaggregated: Dealers (Commercial)
+                dealer_long             = row.get("dealer_long", 0),
+                dealer_short            = row.get("dealer_short", 0),
+                dealer_spread           = row.get("dealer_spread", 0),
+                # Disaggregated: Asset Managers (Institutional Specs)
+                asset_mgr_long          = row.get("asset_mgr_long", 0),
+                asset_mgr_short         = row.get("asset_mgr_short", 0),
+                asset_mgr_spread        = row.get("asset_mgr_spread", 0),
+                # Disaggregated: Leveraged Money (Small Specs)
+                lev_money_long          = row.get("lev_money_long", 0),
+                lev_money_short         = row.get("lev_money_short", 0),
+                lev_money_spread        = row.get("lev_money_spread", 0),
+                # Changes
+                change_dealer_long      = row.get("change_dealer_long", 0),
+                change_dealer_short     = row.get("change_dealer_short", 0),
+                change_asset_mgr_long   = row.get("change_asset_mgr_long", 0),
+                change_asset_mgr_short  = row.get("change_asset_mgr_short", 0),
+                change_lev_money_long   = row.get("change_lev_money_long", 0),
+                change_lev_money_short  = row.get("change_lev_money_short", 0),
+                change_oi               = row.get("change_oi", 0),
             )
             records.append(rec)
         except Exception as exc:
-            log.warning("cot.row.invalid", reason=str(exc))
+            log.warning("cot.row.invalid", reason=str(exc), 
+                       report_date=row.get("report_date"))
 
     if not records:
         log.error("cot.all_rows_invalid", pair=pair)
@@ -412,25 +495,40 @@ def fetch_cot(
     log.info("cot.validated", pair=pair, valid_records=len(records))
 
     # ── Build DataFrame ───────────────────────────────────────────────────────
+    # model_dump() includes derived fields: dealer_net, asset_mgr_net, lev_money_net, 
+    # smart_money_index, speculative_pressure (calculated in Pydantic validator)
     df = pd.DataFrame([r.model_dump() for r in records])
     df = df.drop_duplicates(subset=["report_date"]).sort_values("report_date")
 
-    # ── Z-score enrichment ────────────────────────────────────────────────────
-    df = _add_zscore(df, window=ZSCORE_WINDOW)
+    # ── Enrichment Pipeline (order matters) ──────────────────────────────────
+    
+    # 1. Calculate % of OI (creates *_pct columns)
+    df = _calc_percent_oi(df)
+    
+    # 2. Calculate CCI and z-score (main predictive feature)
+    #    Requires: dealer_net, asset_mgr_net, open_interest
+    df = _add_cci(df, window=ZSCORE_WINDOW)
+    
+    # 3. Calculate concentration risk (for position sizing adjustments)
+    df = _calc_conc_risk(df, threshold=0.70)
+    
+    # 4. Detect contract roll weeks (mute signals during rolls)
+    df = _detect_roll_weeks(df, threshold=0.25)
+    
+    # 5. Staleness check (data quality flag)
+    df = _check_staleness(df, threshold=10)
 
-    # ── Staleness flag ────────────────────────────────────────────────────────
-    df = _check_staleness(df)
-
-    # ── Cache current year ────────────────────────────────────────────────────
-    _save_parquet(df, pair, current_year)
+    # ── Cache with proper key (includes lookback_years) ──────────────────────
+    _save_parquet(df, pair, current_year, lookback_years)
 
     return df.reset_index(drop=True)
+
 
 
 def get_latest_cot(pair: str = "EURUSD") -> Optional[pd.Series]:
     """
     Return the single most recent COT record as a Series.
-    Used by the feature calculator to get F3_cot_z.
+    Used by the feature calculator to get F3 (cci_z) and bias inputs.
     """
     df = fetch_cot(pair=pair)
     if df.empty:
@@ -440,8 +538,11 @@ def get_latest_cot(pair: str = "EURUSD") -> Optional[pd.Series]:
         "cot.latest",
         pair=pair,
         report_date=latest["report_date"],
-        nc_net=int(latest["nc_net"]),
-        cot_z=round(float(latest["cot_z_score"]), 3),
+        dealer_net=int(latest["dealer_net"]),
+        asset_mgr_net=int(latest["asset_mgr_net"]),
+        cci_z=round(float(latest["cci_z"]), 3),
+        is_roll_week=bool(latest.get("is_roll_week", False)),
+        is_high_conc=bool(latest.get("is_high_conc", False)),
         quality_flag=int(latest["quality_flag"]),
     )
     return latest
@@ -460,6 +561,238 @@ def fetch_cot_all_pairs(lookback_years: int = 2) -> dict[str, pd.DataFrame]:
             log.error("cot.pair.failed", pair=pair, error=str(exc))
             results[pair] = pd.DataFrame()
     return results
+
+
+def _calc_conc_risk(
+    df: pd.DataFrame, 
+    col: str = "conc_gross_4_long",
+    threshold: float = 0.70) -> pd.DataFrame:
+    """
+    Calculate concentration risk from top-4 trader gross long positions.
+    
+    CFTC concentration data is typically expressed as a percentage (0-100).
+    This normalizes it to a 0-1 fraction and flags high-concentration regimes
+    where a few large players dominate (>70% by default).
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain the concentration column (default: 'conc_gross_4_long')
+    col : str
+        Column name for gross concentration of top 4 traders
+    threshold : float
+        Threshold above which concentration is flagged as high risk (0-1 scale)
+        
+    Returns
+    -------
+    pd.DataFrame
+        Copy of input with added columns:
+        - 'conc_risk': Normalized concentration [0, 1]
+        - 'is_high_conc': Boolean flag if concentration > threshold
+        
+    Raises
+    ------
+    ValueError
+        If the specified concentration column is missing
+    """
+    if col not in df.columns:
+        raise ValueError(
+            f"Concentration column '{col}' not found. "
+            f"Available columns: {list(df.columns)}"
+        )
+    
+    # Prevent mutation of original DataFrame
+    df = df.copy()
+    
+    # Handle NaN and normalize percentage (e.g., 55.7 -> 0.557)
+    # CFTC files report this as 0-100, so we divide by 100
+    raw_values = df[col].fillna(0)
+    
+    # Auto-detect if already fractional (0-1) or percentage (0-100)
+    if raw_values.max() > 1.0:
+        df["conc_risk"] = (raw_values / 100).clip(0, 1)
+    else:
+        df["conc_risk"] = raw_values.clip(0, 1)
+    
+    df["is_high_conc"] = df["conc_risk"] > threshold
+    
+    # Monitoring: log when concentration spikes
+    if df["is_high_conc"].any():
+        log.warning(
+            "cot.high_concentration",
+            count=int(df["is_high_conc"].sum()),
+            max_conc=round(float(df["conc_risk"].max()), 2),
+            threshold=threshold
+        )
+    
+    return df
+
+
+def _calc_percent_oi(
+    df: pd.DataFrame, 
+    cols: list[str] | None = None) -> pd.DataFrame:
+    """
+    Calculate net positions as percentage of total Open Interest.
+    
+    Net position columns (e.g., 'dealer_net') are divided by Open Interest
+    to produce a normalized fraction (e.g., 0.543 = 54.3% of OI).
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain 'open_interest' and the specified net position columns
+    cols : list[str] | None, optional
+        Net position columns to normalize. 
+        Defaults to: ['dealer_net', 'asset_mgr_net', 'lev_money_net']
+        
+    Returns
+    -------
+    pd.DataFrame
+        Copy of input with added columns '{col}_pct' containing the OI fraction
+        
+    Raises
+    ------
+    ValueError
+        If required columns are missing from DataFrame
+        
+    Notes
+    -----
+    - Division by zero (0 OI) produces NaN rather than inf
+    - Results are clipped to reasonable bounds (-1.5, +1.5) to catch data errors
+    """
+    if cols is None:
+        cols = ["dealer_net", "asset_mgr_net", "lev_money_net"]
+    
+    required = ["open_interest"] + cols
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns for OI calc: {missing}")
+    
+    df = df.copy()
+    
+    # Protect against division by zero - replace 0 with NaN to propagate NaN in result
+    oi_safe = df["open_interest"].replace(0, float("nan"))
+    
+    # Warn if we have zero OI rows (indicates bad data or roll week anomalies)
+    if oi_safe.isna().any():
+        zero_count = oi_safe.isna().sum()
+        log.warning(
+            "cot.zero_open_interest",
+            count=int(zero_count),
+            pct_of_data=round(100 * zero_count / len(df), 2)
+        )
+    
+    for col in cols:
+        new_col = f"{col}_pct"
+        df[new_col] = (df[col] / oi_safe).round(6)
+        
+        # Sanity check: net positions shouldn't exceed OI by >50% (spreads can cause slight overlap)
+        invalid_mask = df[new_col].abs() > 1.5
+        if invalid_mask.any():
+            log.error(
+                "cot.invalid_oi_ratio",
+                column=col,
+                count=int(invalid_mask.sum()),
+                max_ratio=float(df.loc[invalid_mask, new_col].abs().max()),
+                dates=df.loc[invalid_mask, "report_date"].head(3).tolist()
+            )
+            # Cap extreme outliers to prevent downstream algorithm distortion
+            df[new_col] = df[new_col].clip(-1.5, 1.5)
+    
+    return df
+
+# ── Z-score enrichment && CCI calculation ────────────────────────────────────────────────────────
+
+def _add_cci(df: pd.DataFrame, window: int = 52, min_periods: int = 12) -> pd.DataFrame:
+    """
+    Calculate COT Composite Index (CCI) and its rolling z-score.
+    
+    CCI captures the divergence between Commercial (Dealer) and Institutional 
+    Speculative (Asset Manager) positioning:
+        CCI = (Dealer_Net - Asset_Mgr_Net) / Open_Interest
+    
+    Interpretation:
+        +CCI → Dealers net-long vs Asset Managers net-short (Smart Money bullish)
+        -CCI → Dealers net-short vs Asset Managers net-long (Smart Money bearish)
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain columns: ['report_date', 'dealer_net', 'asset_mgr_net', 'open_interest']
+    window : int, optional
+        Rolling lookback window in weeks for z-score (default: 52)
+    min_periods : int, optional
+        Minimum observations required to calculate z-score (default: 12)
+    
+    Returns
+    -------
+    pd.DataFrame
+        Input DataFrame with added columns:
+        - 'cci'    : Raw composite index [-1, +1] range theoretically unbounded
+        - 'cci_z'  : Z-scored CCI over the rolling window (clipped to ±4)
+    """
+    required = ["report_date", "dealer_net", "asset_mgr_net", "open_interest"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"CCI calculation missing columns: {missing}")
+    
+    df = df.sort_values("report_date").copy()
+    
+    # Calculate raw CCI (Smart Money vs Specs spread)
+    # Protect against div-by-zero by replacing 0 OI with NaN temporarily
+    oi_safe = df["open_interest"].replace(0, float("nan"))
+    df["cci"] = (df["dealer_net"] - df["asset_mgr_net"]) / oi_safe
+    
+    # Rolling statistics for z-score
+    rolling_mean = df["cci"].rolling(window=window, min_periods=min_periods).mean()
+    rolling_std = df["cci"].rolling(window=window, min_periods=min_periods).std()
+    
+    # Avoid div-by-zero in std (flat periods where all values identical)
+    rolling_std_safe = rolling_std.replace(0, float("nan"))
+    
+    # Calculate z-score: how many std-devs is current CCI vs its year-long average?
+    df["cci_z"] = ((df["cci"] - rolling_mean) / rolling_std_safe).round(4)
+    
+    # Cap extremes to prevent outliers from dominating (optional but recommended)
+    df["cci_z"] = df["cci_z"].clip(-4, 4)
+    
+    # Log latest value for monitoring
+    latest = df.iloc[-1]
+    log.debug(
+        "cot.cci.calculated",
+        report_date=latest["report_date"],
+        cci=round(float(latest["cci"]), 4),
+        cci_z=round(float(latest["cci_z"]), 4),
+        dealer_net=int(latest["dealer_net"]),
+        asset_mgr_net=int(latest["asset_mgr_net"]),
+    )
+    
+    return df
+
+def _detect_roll_weeks(df: pd.DataFrame, threshold: float = 0.25) -> pd.DataFrame:
+    """
+    Flag weeks where dealer spread positions exceed threshold % of OI.
+    This indicates a contract roll - directional signals should be muted.
+    """
+    # Ensures data is sorted chronologically
+    df = df.sort_values("report_date").copy()
+
+    df["dealer_spread_pct"] = df["dealer_spread"] / df["open_interest"].replace(0, float("nan"))
+    df["is_roll_week"] = df["dealer_spread_pct"] > threshold
+    
+    # Optional: flag the week before and after as "transition" periods
+    df["is_roll_transition"] = (
+        df["is_roll_week"] | 
+        df["is_roll_week"].shift(1).fillna(False) | 
+        df["is_roll_week"].shift(-1).fillna(False)
+    )
+    
+    if df["is_roll_week"].any():
+        log.warning("cot.roll_weeks_detected", 
+                   count=int(df["is_roll_week"].sum()),
+                   max_spread_pct=round(df["dealer_spread_pct"].max(), 2))
+    
+    return df
 
 
 # ── CLI smoke-test ────────────────────────────────────────────────────────────
