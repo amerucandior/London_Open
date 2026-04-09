@@ -1,29 +1,3 @@
-"""
-src/ingestion/cot.py
-─────────────────────
-CFTC Commitment of Traders (COT) ingestion for the FX bias detector.
-
-Source   : CFTC public FTP/HTTPS — Disaggregated Futures Only (financial)
-URL      : https://www.cftc.gov/files/dea/history/fut_fin_xls_{YEAR}.zip
-Format   : CSV inside ZIP, released every Friday ~15:30 ET (data as of prior Tuesday)
-Output   : pd.DataFrame + Parquet cache
-
-Relevant contracts:
-    EURUSD → "EURO FX"    (CFTC code 099741)
-    GBPUSD → "BRITISH POUND STG" (CFTC code 096742)
-
-Features extracted:
-    - Non-commercial net positions (large speculators)
-    - Change in net positions (week-on-week)
-    - Open interest
-    - COT index (net as % of OI, z-scored over rolling 52w window)
-
-Dependencies (all in requirements.txt):
-    requests, tenacity, pydantic, pandas, python-dotenv, structlog
-"""
-
-from __future__ import annotations
-
 import io
 import os
 import zipfile
@@ -75,20 +49,20 @@ _COL_ALIASES: dict[str, list[str]] = {
     "report_date": ["As_of_Date_In_Form_YYMMDD", "As of Date in Form YYMMDD"],
     "contract_name": ["Market_and_Exchange_Names", "Market and Exchange Names"],
     "open_interest": ["Open_Interest_All", "Open Interest (All)"],
-    
+
     # Disaggregated categories (the ones that matter)
     "dealer_long": ["Dealer_Positions_Long_All", "Dealer Positions Long (All)"],
     "dealer_short": ["Dealer_Positions_Short_All", "Dealer Positions Short (All)"],
     "dealer_spread": ["Dealer_Positions_Spread_All", "Dealer Positions Spread (All)"],
-    
+
     "asset_mgr_long": ["Asset_Mgr_Positions_Long_All", "Asset Manager Positions Long (All)"],
     "asset_mgr_short": ["Asset_Mgr_Positions_Short_All", "Asset Manager Positions Short (All)"],
     "asset_mgr_spread": ["Asset_Mgr_Positions_Spread_All", "Asset Manager Positions Spread (All)"],
-    
+
     "lev_money_long": ["Lev_Money_Positions_Long_All", "Leveraged Money Positions Long (All)"],
     "lev_money_short": ["Lev_Money_Positions_Short_All", "Leveraged Money Positions Short (All)"],
     "lev_money_spread": ["Lev_Money_Positions_Spread_All", "Leveraged Money Positions Spread (All)"],
-    
+
     # Changes
     "change_dealer_long": ["Change_in_Dealer_Long_All", "Change in Dealer Long (All)"],
     "change_dealer_short": ["Change_in_Dealer_Short_All", "Change in Dealer Short (All)"],
@@ -97,7 +71,7 @@ _COL_ALIASES: dict[str, list[str]] = {
     "change_lev_money_long": ["Change_in_Lev_Money_Long_All", "Change in Lev Money Long (All)"],
     "change_lev_money_short": ["Change_in_Lev_Money_Short_All", "Change in Lev Money Short (All)"],
     "change_oi": ["Change_in_Open_Interest_All", "Change in Open Interest (All)"],
-    
+
     # Concentration (valuable) used for risk management when top traders have large positions
     "conc_gross_4_long": ["Conc_Gross_LE_4_TDR_Long_All", "Concentration Gross Long 4 TDR"],
     "conc_gross_4_short": ["Conc_Gross_LE_4_TDR_Short_All", "Concentration Gross Short 4 TDR"],
@@ -140,23 +114,46 @@ class COTRecord(BaseModel):
     change_lev_money_long:  int
     change_lev_money_short: int
     change_oi:              int
+    # Concentration
+    conc_gross_4_long:      float
+    conc_gross_4_short:     float
 
     # Derived
     dealer_net: int = 0
     asset_mgr_net: int = 0
     lev_money_net: int = 0
-    
+
     # The classic "Smart Money vs Dumb Money" spread
     smart_money_index: float = 0.0  # dealer_net / OI (z-scored later)
     speculative_pressure: float = 0.0  # asset_mgr_net / OI
 
-    @field_validator("open_interest", "nc_long", "nc_short", mode="before")
+    @field_validator(
+        "open_interest",
+        "dealer_long", "dealer_short", "dealer_spread",
+        "asset_mgr_long", "asset_mgr_short", "asset_mgr_spread",
+        "lev_money_long", "lev_money_short", "lev_money_spread",
+        "change_dealer_long", "change_dealer_short",
+        "change_asset_mgr_long", "change_asset_mgr_short",
+        "change_lev_money_long", "change_lev_money_short",
+        "change_oi",
+        mode="before"
+    )
     @classmethod
     def coerce_int(cls, v) -> int:
+        """
+        Coerce CFTC field to int.
+        Handles: NaN, float, comma-formatted strings, None.
+        NaN and None → 0 (change fields have NaN on first week of year).
+        """
+        if v is None:
+            return 0
         try:
-            return int(str(v).replace(",", "").strip())
+            f = float(v)
         except (ValueError, TypeError):
             return 0
+        if f != f:  # NaN check — faster than math.isnan, works on all types
+            return 0
+        return int(f)
 
     @field_validator("report_date")
     @classmethod
@@ -169,7 +166,7 @@ class COTRecord(BaseModel):
         self.dealer_net = self.dealer_long - self.dealer_short
         self.asset_mgr_net = self.asset_mgr_long - self.asset_mgr_short
         self.lev_money_net = self.lev_money_long - self.lev_money_short
-        
+
         if self.open_interest > 0:
             self.smart_money_index = self.dealer_net / self.open_interest
             self.speculative_pressure = self.asset_mgr_net / self.open_interest
@@ -206,22 +203,35 @@ def _download_cftc_zip(year: int) -> bytes:
 
 
 def _extract_csv_from_zip(zip_bytes: bytes, year: int) -> str:
-    """Extract the main CSV from a CFTC ZIP file."""
+    """Extract the main data file (CSV, TXT, or XLS) from a CFTC ZIP file."""
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         names = zf.namelist()
         log.debug("cot.zip.contents", files=names)
 
-        # CFTC ZIP typically contains one CSV
-        csv_files = [n for n in names if n.lower().endswith(".csv")]
-        if not csv_files:
-            # Also try .txt (older releases)
-            csv_files = [n for n in names if n.lower().endswith(".txt")]
-        if not csv_files:
-            raise ValueError(f"No CSV/TXT found in CFTC ZIP for {year}. Contents: {names}")
+        # Prioritize XLS files as they are causing the current issue
+        xls_files = [n for n in names if n.lower().endswith(".xls")]
+        if xls_files:
+            target = xls_files[0]
+            log.info("cot.zip.extract", file=target, format="xls")
+            # Read the XLS file into a pandas DataFrame
+            xls_content = zf.read(target)
+            df = pd.read_excel(io.BytesIO(xls_content))
+            # Convert to CSV string, as downstream expects CSV format
+            return df.to_csv(index=False)
 
-        target = csv_files[0]
-        log.info("cot.zip.extract", file=target)
-        return zf.read(target).decode("utf-8", errors="replace")
+        csv_files = [n for n in names if n.lower().endswith(".csv")]
+        if csv_files:
+            target = csv_files[0]
+            log.info("cot.zip.extract", file=target, format="csv")
+            return zf.read(target).decode("utf-8", errors="replace")
+
+        txt_files = [n for n in names if n.lower().endswith(".txt")]
+        if txt_files:
+            target = txt_files[0]
+            log.info("cot.zip.extract", file=target, format="txt")
+            return zf.read(target).decode("utf-8", errors="replace")
+
+        raise ValueError(f"No CSV, TXT, or XLS found in CFTC ZIP for {year}. Contents: {names}")
 
 
 # ── Column normalisation ──────────────────────────────────────────────────────
@@ -279,22 +289,22 @@ def _filter_contracts(df: pd.DataFrame, pair: str) -> pd.DataFrame:
 
 # ── Staleness check ───────────────────────────────────────────────────────────
 def _check_staleness(
-    df: pd.DataFrame, 
+    df: pd.DataFrame,
     threshold: int = 10) -> pd.DataFrame:
     """
     Flag rows where the report date is older than the most recent COT release.
-    
+
     CFTC reports are as of Tuesday, released Friday ~15:30 ET.
-    We measure staleness as days between the report's as-of date and the 
+    We measure staleness as days between the report's as-of date and the
     most recent Tuesday (when fresh data should have been released).
-    
+
     Parameters
     ----------
     df : pd.DataFrame
         Must contain 'report_date' column (string or datetime)
     threshold : int
         Days after which data is flagged as stale (default: 10)
-        
+
     Returns
     -------
     pd.DataFrame
@@ -303,25 +313,25 @@ def _check_staleness(
         - 'quality_flag': 0=fresh, 1=warning(>threshold), 2=stale(>threshold+7)
     """
     df = df.copy()
-    
+
     # Calculate most recent Tuesday (CFTC reporting date)
     today = datetime.now(timezone.utc).date()
     days_since_tuesday = (today.weekday() - 1) % 7  # Tuesday = 1
     last_tuesday = today - timedelta(days=days_since_tuesday)
-    
+
     # Calculate age of each record relative to reporting cycle
     report_dates = pd.to_datetime(df["report_date"]).dt.date
-    
+
     # Handle timezone-aware vs naive comparisons
     df["days_old"] = (last_tuesday - report_dates).apply(
         lambda d: d.days if hasattr(d, 'days') else (last_tuesday - d).days
     )
-    
+
     # Quality flag: 0=fresh, 1=warning, 2=stale
     df["quality_flag"] = df["days_old"].apply(
         lambda d: 0 if d <= threshold else (2 if d > (threshold + 7) else 1)
     )
-    
+
     # Logging
     stale_count = (df["quality_flag"] > 0).sum()
     if stale_count > 0:
@@ -335,7 +345,7 @@ def _check_staleness(
             threshold=threshold,
             reference_tuesday=str(last_tuesday)
         )
-    
+
     return df
 
 
@@ -482,11 +492,14 @@ def fetch_cot(
                 change_lev_money_long   = row.get("change_lev_money_long", 0),
                 change_lev_money_short  = row.get("change_lev_money_short", 0),
                 change_oi               = row.get("change_oi", 0),
+                # Concentration
+                conc_gross_4_long       = row.get("conc_gross_4_long", 0),
+                conc_gross_4_short      = row.get("conc_gross_4_short", 0)
             )
             records.append(rec)
         except Exception as exc:
-            log.warning("cot.row.invalid", reason=str(exc), 
-                       report_date=row.get("report_date"))
+            log.warning("cot.row.invalid", reason=str(exc),
+            report_date=row.get("report_date"))
 
     if not records:
         log.error("cot.all_rows_invalid", pair=pair)
@@ -495,34 +508,49 @@ def fetch_cot(
     log.info("cot.validated", pair=pair, valid_records=len(records))
 
     # ── Build DataFrame ───────────────────────────────────────────────────────
-    # model_dump() includes derived fields: dealer_net, asset_mgr_net, lev_money_net, 
+    # model_dump() includes derived fields: dealer_net, asset_mgr_net, lev_money_net,
     # smart_money_index, speculative_pressure (calculated in Pydantic validator)
     df = pd.DataFrame([r.model_dump() for r in records])
     df = df.drop_duplicates(subset=["report_date"]).sort_values("report_date")
 
     # ── Enrichment Pipeline (order matters) ──────────────────────────────────
-    
+
     # 1. Calculate % of OI (creates *_pct columns)
     df = _calc_percent_oi(df)
-    
+
     # 2. Calculate CCI and z-score (main predictive feature)
     #    Requires: dealer_net, asset_mgr_net, open_interest
     df = _add_cci(df, window=ZSCORE_WINDOW)
-    
+
     # 3. Calculate concentration risk (for position sizing adjustments)
     df = _calc_conc_risk(df, threshold=0.70)
-    
+
     # 4. Detect contract roll weeks (mute signals during rolls)
     df = _detect_roll_weeks(df, threshold=0.25)
-    
-    # 5. Staleness check (data quality flag)
+
+    # 5. Leveraged money extreme — requires lev_money_net_pct from step 1
+    df = _add_lev_money_extreme(df, window=ZSCORE_WINDOW)
+
+    # 6. Positioning Momentum + signal strength
+    df = _add_positioning_momentum(df)
+
+    # 7. Concentration risk — position size modifier, runs after regime
+    df = _calc_conc_risk(df, threshold=0.70)
+
+    # 8. Apply concentration penalty to position_scale
+    df.loc[df["is_high_conc"], "position_scale"] *= 0.6
+    df["position_scale"] = df["position_scale"].clip(0.0, 2.0)
+
+    # 9. Staleness check (data quality flag)
     df = _check_staleness(df, threshold=10)
+
+    # 10. Zero out all signals on stale data — garbage in, garbage out
+    df.loc[df["quality_flag"] == 2, ["regime_confirmed", "signal_strength", "position_scale"]] = [False, 0.0, 0.0]
 
     # ── Cache with proper key (includes lookback_years) ──────────────────────
     _save_parquet(df, pair, current_year, lookback_years)
 
     return df.reset_index(drop=True)
-
 
 
 def get_latest_cot(pair: str = "EURUSD") -> Optional[pd.Series]:
@@ -543,7 +571,8 @@ def get_latest_cot(pair: str = "EURUSD") -> Optional[pd.Series]:
         cci_z=round(float(latest["cci_z"]), 3),
         is_roll_week=bool(latest.get("is_roll_week", False)),
         is_high_conc=bool(latest.get("is_high_conc", False)),
-        quality_flag=int(latest["quality_flag"]),
+        quality_flag=int(latest["quality_flag"])
+
     )
     return latest
 
@@ -564,16 +593,16 @@ def fetch_cot_all_pairs(lookback_years: int = 2) -> dict[str, pd.DataFrame]:
 
 
 def _calc_conc_risk(
-    df: pd.DataFrame, 
+    df: pd.DataFrame,
     col: str = "conc_gross_4_long",
     threshold: float = 0.70) -> pd.DataFrame:
     """
     Calculate concentration risk from top-4 trader gross long positions.
-    
+
     CFTC concentration data is typically expressed as a percentage (0-100).
     This normalizes it to a 0-1 fraction and flags high-concentration regimes
     where a few large players dominate (>70% by default).
-    
+
     Parameters
     ----------
     df : pd.DataFrame
@@ -582,14 +611,14 @@ def _calc_conc_risk(
         Column name for gross concentration of top 4 traders
     threshold : float
         Threshold above which concentration is flagged as high risk (0-1 scale)
-        
+
     Returns
     -------
     pd.DataFrame
         Copy of input with added columns:
         - 'conc_risk': Normalized concentration [0, 1]
         - 'is_high_conc': Boolean flag if concentration > threshold
-        
+
     Raises
     ------
     ValueError
@@ -600,22 +629,22 @@ def _calc_conc_risk(
             f"Concentration column '{col}' not found. "
             f"Available columns: {list(df.columns)}"
         )
-    
+
     # Prevent mutation of original DataFrame
     df = df.copy()
-    
+
     # Handle NaN and normalize percentage (e.g., 55.7 -> 0.557)
     # CFTC files report this as 0-100, so we divide by 100
     raw_values = df[col].fillna(0)
-    
+
     # Auto-detect if already fractional (0-1) or percentage (0-100)
     if raw_values.max() > 1.0:
         df["conc_risk"] = (raw_values / 100).clip(0, 1)
     else:
         df["conc_risk"] = raw_values.clip(0, 1)
-    
+
     df["is_high_conc"] = df["conc_risk"] > threshold
-    
+
     # Monitoring: log when concentration spikes
     if df["is_high_conc"].any():
         log.warning(
@@ -624,37 +653,37 @@ def _calc_conc_risk(
             max_conc=round(float(df["conc_risk"].max()), 2),
             threshold=threshold
         )
-    
+
     return df
 
 
 def _calc_percent_oi(
-    df: pd.DataFrame, 
+    df: pd.DataFrame,
     cols: list[str] | None = None) -> pd.DataFrame:
     """
     Calculate net positions as percentage of total Open Interest.
-    
+
     Net position columns (e.g., 'dealer_net') are divided by Open Interest
     to produce a normalized fraction (e.g., 0.543 = 54.3% of OI).
-    
+
     Parameters
     ----------
     df : pd.DataFrame
         Must contain 'open_interest' and the specified net position columns
     cols : list[str] | None, optional
-        Net position columns to normalize. 
+        Net position columns to normalize.
         Defaults to: ['dealer_net', 'asset_mgr_net', 'lev_money_net']
-        
+
     Returns
     -------
     pd.DataFrame
         Copy of input with added columns '{col}_pct' containing the OI fraction
-        
+
     Raises
     ------
     ValueError
         If required columns are missing from DataFrame
-        
+
     Notes
     -----
     - Division by zero (0 OI) produces NaN rather than inf
@@ -662,17 +691,17 @@ def _calc_percent_oi(
     """
     if cols is None:
         cols = ["dealer_net", "asset_mgr_net", "lev_money_net"]
-    
+
     required = ["open_interest"] + cols
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns for OI calc: {missing}")
-    
+
     df = df.copy()
-    
+
     # Protect against division by zero - replace 0 with NaN to propagate NaN in result
     oi_safe = df["open_interest"].replace(0, float("nan"))
-    
+
     # Warn if we have zero OI rows (indicates bad data or roll week anomalies)
     if oi_safe.isna().any():
         zero_count = oi_safe.isna().sum()
@@ -681,11 +710,11 @@ def _calc_percent_oi(
             count=int(zero_count),
             pct_of_data=round(100 * zero_count / len(df), 2)
         )
-    
+
     for col in cols:
         new_col = f"{col}_pct"
         df[new_col] = (df[col] / oi_safe).round(6)
-        
+
         # Sanity check: net positions shouldn't exceed OI by >50% (spreads can cause slight overlap)
         invalid_mask = df[new_col].abs() > 1.5
         if invalid_mask.any():
@@ -698,7 +727,7 @@ def _calc_percent_oi(
             )
             # Cap extreme outliers to prevent downstream algorithm distortion
             df[new_col] = df[new_col].clip(-1.5, 1.5)
-    
+
     return df
 
 # ── Z-score enrichment && CCI calculation ────────────────────────────────────────────────────────
@@ -706,15 +735,15 @@ def _calc_percent_oi(
 def _add_cci(df: pd.DataFrame, window: int = 52, min_periods: int = 12) -> pd.DataFrame:
     """
     Calculate COT Composite Index (CCI) and its rolling z-score.
-    
-    CCI captures the divergence between Commercial (Dealer) and Institutional 
+
+    CCI captures the divergence between Commercial (Dealer) and Institutional
     Speculative (Asset Manager) positioning:
         CCI = (Dealer_Net - Asset_Mgr_Net) / Open_Interest
-    
+
     Interpretation:
         +CCI → Dealers net-long vs Asset Managers net-short (Smart Money bullish)
         -CCI → Dealers net-short vs Asset Managers net-long (Smart Money bearish)
-    
+
     Parameters
     ----------
     df : pd.DataFrame
@@ -723,7 +752,7 @@ def _add_cci(df: pd.DataFrame, window: int = 52, min_periods: int = 12) -> pd.Da
         Rolling lookback window in weeks for z-score (default: 52)
     min_periods : int, optional
         Minimum observations required to calculate z-score (default: 12)
-    
+
     Returns
     -------
     pd.DataFrame
@@ -735,27 +764,27 @@ def _add_cci(df: pd.DataFrame, window: int = 52, min_periods: int = 12) -> pd.Da
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"CCI calculation missing columns: {missing}")
-    
+
     df = df.sort_values("report_date").copy()
-    
+
     # Calculate raw CCI (Smart Money vs Specs spread)
     # Protect against div-by-zero by replacing 0 OI with NaN temporarily
     oi_safe = df["open_interest"].replace(0, float("nan"))
     df["cci"] = (df["dealer_net"] - df["asset_mgr_net"]) / oi_safe
-    
+
     # Rolling statistics for z-score
     rolling_mean = df["cci"].rolling(window=window, min_periods=min_periods).mean()
     rolling_std = df["cci"].rolling(window=window, min_periods=min_periods).std()
-    
+
     # Avoid div-by-zero in std (flat periods where all values identical)
     rolling_std_safe = rolling_std.replace(0, float("nan"))
-    
+
     # Calculate z-score: how many std-devs is current CCI vs its year-long average?
     df["cci_z"] = ((df["cci"] - rolling_mean) / rolling_std_safe).round(4)
-    
+
     # Cap extremes to prevent outliers from dominating (optional but recommended)
     df["cci_z"] = df["cci_z"].clip(-4, 4)
-    
+
     # Log latest value for monitoring
     latest = df.iloc[-1]
     log.debug(
@@ -764,9 +793,9 @@ def _add_cci(df: pd.DataFrame, window: int = 52, min_periods: int = 12) -> pd.Da
         cci=round(float(latest["cci"]), 4),
         cci_z=round(float(latest["cci_z"]), 4),
         dealer_net=int(latest["dealer_net"]),
-        asset_mgr_net=int(latest["asset_mgr_net"]),
+        asset_mgr_net=int(latest["asset_mgr_net"])
     )
-    
+
     return df
 
 def _detect_roll_weeks(df: pd.DataFrame, threshold: float = 0.25) -> pd.DataFrame:
@@ -779,55 +808,245 @@ def _detect_roll_weeks(df: pd.DataFrame, threshold: float = 0.25) -> pd.DataFram
 
     df["dealer_spread_pct"] = df["dealer_spread"] / df["open_interest"].replace(0, float("nan"))
     df["is_roll_week"] = df["dealer_spread_pct"] > threshold
-    
+
     # Optional: flag the week before and after as "transition" periods
     df["is_roll_transition"] = (
-        df["is_roll_week"] | 
-        df["is_roll_week"].shift(1).fillna(False) | 
+        df["is_roll_week"] |
+        df["is_roll_week"].shift(1).fillna(False) |
         df["is_roll_week"].shift(-1).fillna(False)
     )
-    
+
     if df["is_roll_week"].any():
-        log.warning("cot.roll_weeks_detected", 
+        log.warning("cot.roll_weeks_detected",
                    count=int(df["is_roll_week"].sum()),
                    max_spread_pct=round(df["dealer_spread_pct"].max(), 2))
-    
+
     return df
 
+def _add_positioning_momentum(
+    df: pd.DataFrame,
+    flow_window: int = 3,
+    z_threshold: float = 1.0,
+    scale_aligned: float = 1.5,
+    scale_conflict: float = 0.8
+) -> pd.DataFrame:
+    """
+    Calculate Dealer vs Asset Manager positioning momentum, acceleration, and divergence.
 
+    This captures the *rate of change* in institutional positioning (flow) and
+    identifies acceleration regimes where Smart Money (Dealers) and Specs (Asset
+    Managers) are moving in alignment or divergence.
+
+    # +CCI → Dealers net-long vs Asset Managers net-short (Smart Money bullish) #
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain: ['report_date', 'change_dealer_long', 'change_dealer_short',
+                      'change_asset_mgr_long', 'change_asset_mgr_short', 'open_interest',
+                      'cci_z', 'is_roll_week']
+    flow_window : int, default 3
+        Rolling window (weeks) for cumulative flow calculation
+    z_threshold : float, default 1.0
+        CCI z-score threshold for regime confirmation
+    scale_aligned : float, default 1.5
+        Position size multiplier when flow_aligned=True and regime confirmed
+    scale_conflict : float, default 0.8
+        Position size multiplier when flows conflict (contrarian signal)
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy with added columns:
+        - *_flow_3w: Cumulative 3-week net positioning change (contracts)
+        - *_flow_3w_pct: Flow as % of OI (normalized)
+        - *_accel: Week-over-week change in flow (acceleration)
+        - flow_divergence: Dealer flow minus Asset Mgr flow (positive = dealers more bullish)
+        - divergence_accel: Rate of change in divergence (momentum of the spread)
+        - flow_aligned: True if both cohorts moving same direction
+        - alignment_direction: +1 (both buying) or -1 (both selling) when aligned
+        - regime_confirmed: True if aligned + |cci_z| > threshold + not roll week
+        - position_scale: Recommended size multiplier (0.8, 1.0, 1.25, 1.5)
+        - signal_strength: Composite 0-1 score based on flow magnitude and alignment
+    """
+    required = [
+        "report_date", "change_dealer_long", "change_dealer_short",
+        "change_asset_mgr_long", "change_asset_mgr_short", "open_interest",
+        "cci_z", "is_roll_week"
+    ]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Positioning momentum missing columns: {missing}")
+
+    df = df.sort_values("report_date").reset_index(drop=True).copy()
+
+    # ── 1. Calculate Weekly Net Changes (Flow) ─────────────────────────────
+    # Net change = new longs - new shorts (positive = net buying)
+    df["dealer_weekly_net"] = df["change_dealer_long"] - df["change_dealer_short"]
+    df["asset_mgr_weekly_net"] = df["change_asset_mgr_long"] - df["change_asset_mgr_short"]
+
+    # ── 2. Rolling Cumulative Flow (Momentum) ──────────────────────────────
+    # 3-week sum = recent institutional commitment trend
+    df["dealer_flow_3w"] = df["dealer_weekly_net"].rolling(window=flow_window, min_periods=1).sum()
+    df["asset_mgr_flow_3w"] = df["asset_mgr_weekly_net"].rolling(window=flow_window, min_periods=1).sum()
+
+    # Normalize by Open Interest for cross-time comparability
+    oi_safe = df["open_interest"].replace(0, float("nan"))
+    df["dealer_flow_3w_pct"] = (df["dealer_flow_3w"] / oi_safe).round(6)
+    df["asset_mgr_flow_3w_pct"] = (df["asset_mgr_flow_3w"] / oi_safe).round(6)
+
+    # ── 3. Acceleration (Change in Momentum) ───────────────────────────────
+    # Positive = positioning change is accelerating (more buying/selling pressure building)
+    df["dealer_accel"] = df["dealer_flow_3w"].diff()
+    df["asset_mgr_accel"] = df["asset_mgr_flow_3w"].diff()
+
+    # ── 4. Divergence Analysis ─────────────────────────────────────────────
+    # Positive divergence = Dealers buying while Asset Managers selling (or less buying)
+    # Negative divergence = Dealers selling while Asset Managers buying
+    df["flow_divergence"] = df["dealer_flow_3w"] - df["asset_mgr_flow_3w"]
+    df["flow_divergence_pct"] = df["dealer_flow_3w_pct"] - df["asset_mgr_flow_3w_pct"]
+
+    # Acceleration of divergence (widening/narrowing of the spread)
+    df["divergence_accel"] = df["flow_divergence"].diff()
+
+    # ── 5. Alignment Detection ──────────────────────────────────────────────
+    # Same direction positioning = regime confirmation
+    # Opposite direction = potential reversal/inflection point
+    df["flow_aligned"] = (df["dealer_flow_3w"] * df["asset_mgr_flow_3w"]) > 0
+
+    df["alignment_direction"] = 0
+    df.loc[df["flow_aligned"] & (df["dealer_flow_3w"] > 0), "alignment_direction"] = 1   # Both buying
+    df.loc[df["flow_aligned"] & (df["dealer_flow_3w"] < 0), "alignment_direction"] = -1  # Both selling
+
+    # Conflict intensity (how strongly they disagree)
+    oi_safe = df["open_interest"].replace(0, float("nan")).values  # numpy array, positional
+    df["conflict_magnitude"] = 0.0
+    conflict_mask = ~df["flow_aligned"]
+    df.loc[conflict_mask, "conflict_magnitude"] = (
+        (df.loc[conflict_mask, "dealer_flow_3w"].abs() +
+         df.loc[conflict_mask, "asset_mgr_flow_3w"].abs()) / 2 / oi_safe[conflict_mask]
+    ).round(6)
+
+    # ── 6. Regime Confirmation & Position Sizing ──────────────────────────
+    # Strong signal when:
+    #   A) Flows aligned AND
+    #   B) CCI confirms the direction (|z| > threshold) AND
+    #   C) Not a contract roll week (mechanical noise)
+
+    df["regime_confirmed"] = (
+        df["flow_aligned"] &
+        (df["cci_z"].abs() > z_threshold) &
+        (~df["is_roll_week"]) &
+        ((df["alignment_direction"] * df["cci_z"]) > 0)  # CCI direction matches flow
+    )
+
+    # Conflict signal (contrarian opportunity when strong divergence but CCI neutral)
+    df["conflict_opportunity"] = (
+        (~df["flow_aligned"]) &
+        (df["conflict_magnitude"] > 0.05) &  # >5% of OI disagreement
+        (df["cci_z"].abs() < 0.5) &           # CCI not strongly directional
+        (~df["is_roll_week"])
+    )
+
+    # ── 7. Position Scale Recommendation ────────────────────────────────────
+    df["position_scale"] = 1.0
+
+    # Strong confirmation: scale up
+    confirmed_mask = df["regime_confirmed"]
+    df.loc[confirmed_mask, "position_scale"] = scale_aligned
+
+    # Strong disagreement: scale down (wait for clarity) or contrarian fade
+    strong_conflict_mask = df["conflict_magnitude"] > 0.08  # >8% OI divergence
+    df.loc[strong_conflict_mask & (~confirmed_mask), "position_scale"] = scale_conflict
+
+    # Momentum acceleration bonus: if flow is accelerating in alignment, boost further
+    accel_confirmed = (
+        confirmed_mask &
+        (df["dealer_accel"] * df["dealer_flow_3w"] > 0) &  # Same direction as flow (accel)
+        (df["asset_mgr_accel"] * df["asset_mgr_flow_3w"] > 0)
+    )
+    df.loc[accel_confirmed, "position_scale"] *= 1.25  # Additional 25% for acceleration
+
+    # Cap extremes
+    df["position_scale"] = df["position_scale"].clip(0.5, 2.0)
+
+    # ── 8. Signal Strength Score (0-1 composite) ───────────────────────────
+    # Combines: flow magnitude, alignment, CCI confirmation, acceleration
+    df["signal_strength"] = (
+        (df["dealer_flow_3w_pct"].abs().clip(0, 0.3) / 0.3) * 0.3 +       # 30% weight: dealer flow size
+        (df["asset_mgr_flow_3w_pct"].abs().clip(0, 0.3) / 0.3) * 0.3 +    # 30% weight: asset flow size
+        df["flow_aligned"].astype(float) * 0.2 +                          # 20% weight: alignment
+        (df["cci_z"].abs().clip(0, 2) / 2) * 0.2                          # 20% weight: CCI confirmation
+    ).round(3)
+
+    # ── 9. Logging & Monitoring ─────────────────────────────────────────────
+    latest = df.iloc[-1]
+    if latest["regime_confirmed"]:
+        log.info(
+            "cot.regime_confirmed",
+            report_date=latest["report_date"],
+            direction="LONG" if latest["alignment_direction"] == 1 else "SHORT",
+            dealer_flow_3w=int(latest["dealer_flow_3w"]),
+            asset_flow_3w=int(latest["asset_mgr_flow_3w"]),
+            cci_z=round(latest["cci_z"], 2),
+            position_scale=round(latest["position_scale"], 2),
+            signal_strength=latest["signal_strength"]
+        )
+    elif latest["conflict_opportunity"]:
+        log.warning(
+            "cot.conflict_opportunity",
+            report_date=latest["report_date"],
+            divergence_pct=round(latest["flow_divergence_pct"], 3),
+            dealer_flow=int(latest["dealer_flow_3w"]),
+            asset_flow=int(latest["asset_mgr_flow_3w"]),
+            position_scale=round(latest["position_scale"], 2)
+        )
+
+    return df
+
+def _add_lev_money_extreme(df: pd.DataFrame, window: int = 52) -> pd.DataFrame:
+    """
+    Z-score leveraged money (hedge fund) net positioning.
+
+    Leveraged money at extremes = crowded trade = squeeze risk.
+    This is the highest-alpha signal in CFTC disaggregated data for FX.
+
+    Signals:
+        lev_z > +2.0 → hedge funds extremely long → long squeeze risk
+        lev_z < -2.0 → hedge funds extremely short → short squeeze risk
+        lev_z crossing zero → positioning regime shift underway
+    """
+    if "lev_money_net_pct" not in df.columns:
+        raise ValueError("Run _calc_percent_oi before _add_lev_money_extreme")
+
+    df = df.sort_values("report_date").copy()
+
+    rolling = df["lev_money_net_pct"].rolling(window=window, min_periods=12)
+    rolling_std = rolling.std().replace(0, float("nan"))
+
+    df["lev_z"] = ((df["lev_money_net_pct"] - rolling.mean()) / rolling_std).clip(-4, 4).round(4)
+
+    df["is_crowded_long"]  = df["lev_z"] >  2.0
+    df["is_crowded_short"] = df["lev_z"] < -2.0
+
+    # Zero-cross detection: positioning regime flip
+    df["lev_z_prev"] = df["lev_z"].shift(1)
+    df["lev_regime_flip"] = (
+        ((df["lev_z"] > 0) & (df["lev_z_prev"] < 0)) |
+        ((df["lev_z"] < 0) & (df["lev_z_prev"] > 0))
+    )
+    df = df.drop(columns=["lev_z_prev"])
+
+    crowded_count = int((df["is_crowded_long"] | df["is_crowded_short"]).sum())
+    if crowded_count > 0:
+        log.warning(
+            "cot.crowded_positioning",
+            crowded_weeks=crowded_count,
+            current_lev_z=round(float(df.iloc[-1]["lev_z"]), 3)
+        )
+
+    return df
 # ── CLI smoke-test ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import sys
-
-    pd.set_option("display.max_columns", None)
-    pd.set_option("display.width", 160)
-    pd.set_option("display.float_format", lambda x: f"{x:.4f}")
-
-    for pair in ["EURUSD", "GBPUSD"]:
-        print(f"\n{'─'*70}")
-        print(f"  COT — {pair}")
-        print(f"{'─'*70}")
-
-        df = fetch_cot(pair=pair, lookback_years=2, use_cache=False)
-
-        if df.empty:
-            print(f"  No data returned for {pair}")
-            continue
-
-        cols = [
-            "report_date", "nc_long", "nc_short", "nc_net",
-            "nc_net_change", "open_interest", "cot_index",
-            "cot_z_score", "days_old", "quality_flag",
-        ]
-        available = [c for c in cols if c in df.columns]
-        print(df[available].tail(10).to_string(index=False))
-
-        latest = get_latest_cot(pair)
-        if latest is not None:
-            print(f"\n  Latest record  : {latest['report_date']}")
-            print(f"  NC Net         : {int(latest['nc_net']):,}")
-            print(f"  COT z-score    : {latest['cot_z_score']:.4f}")
-            print(f"  Quality flag   : {int(latest['quality_flag'])}")
-
-    sys.exit(0)
+    print(fetch_cot())
