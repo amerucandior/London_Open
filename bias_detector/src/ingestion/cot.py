@@ -158,7 +158,7 @@ class COTRecord(BaseModel):
     @field_validator("report_date")
     @classmethod
     def valid_date(cls, v: str) -> str:
-        pd.to_datetime(v, errors="raise")
+        pd.to_datetime(str(v).zfill(6), format="%y%m%d", errors="raise")
         return v
 
     @model_validator(mode="after")
@@ -319,8 +319,12 @@ def _check_staleness(
     days_since_tuesday = (today.weekday() - 1) % 7  # Tuesday = 1
     last_tuesday = today - timedelta(days=days_since_tuesday)
 
-    # Calculate age of each record relative to reporting cycle
-    report_dates = pd.to_datetime(df["report_date"]).dt.date
+    # Calculate age of each record relative to refporting cycle
+    report_dates = pd.to_datetime(
+    df["report_date"].astype(str).str.zfill(6),
+    format="%y%m%d",
+    errors="coerce"
+    ).dt.date
 
     # Handle timezone-aware vs naive comparisons
     df["days_old"] = (last_tuesday - report_dates).apply(
@@ -522,13 +526,10 @@ def fetch_cot(
     #    Requires: dealer_net, asset_mgr_net, open_interest
     df = _add_cci(df, window=ZSCORE_WINDOW)
 
-    # 3. Calculate concentration risk (for position sizing adjustments)
-    df = _calc_conc_risk(df, threshold=0.70)
-
-    # 4. Detect contract roll weeks (mute signals during rolls)
+    # 3. Detect contract roll weeks (mute signals during rolls)
     df = _detect_roll_weeks(df, threshold=0.25)
 
-    # 5. Leveraged money extreme — requires lev_money_net_pct from step 1
+    # 4. Leveraged money extreme — requires lev_money_net_pct from step 1
     df = _add_lev_money_extreme(df, window=ZSCORE_WINDOW)
 
     # 6. Positioning Momentum + signal strength
@@ -812,8 +813,8 @@ def _detect_roll_weeks(df: pd.DataFrame, threshold: float = 0.25) -> pd.DataFram
     # Optional: flag the week before and after as "transition" periods
     df["is_roll_transition"] = (
         df["is_roll_week"] |
-        df["is_roll_week"].shift(1).fillna(False) |
-        df["is_roll_week"].shift(-1).fillna(False)
+        df["is_roll_week"].shift(1).fillna(False).astype(bool) |
+        df["is_roll_week"].shift(-1).fillna(False).astype(bool)
     )
 
     if df["is_roll_week"].any():
@@ -920,6 +921,7 @@ def _add_positioning_momentum(
 
     # Conflict intensity (how strongly they disagree)
     oi_safe = df["open_interest"].replace(0, float("nan")).values  # numpy array, positional
+
     df["conflict_magnitude"] = 0.0
     conflict_mask = ~df["flow_aligned"]
     df.loc[conflict_mask, "conflict_magnitude"] = (
@@ -933,11 +935,15 @@ def _add_positioning_momentum(
     #   B) CCI confirms the direction (|z| > threshold) AND
     #   C) Not a contract roll week (mechanical noise)
 
+    # Dealer conviction: are dealers adding to their dominant position or reducing?
+    dealer_adding_short = (df["dealer_flow_3w"] < 0) & (df["dealer_net"] < 0)
+    dealer_adding_long  = (df["dealer_flow_3w"] > 0) & (df["dealer_net"] > 0)
+    dealer_has_conviction = dealer_adding_short | dealer_adding_long
+
     df["regime_confirmed"] = (
-        df["flow_aligned"] &
-        (df["cci_z"].abs() > z_threshold) &
-        (~df["is_roll_week"]) &
-        ((df["alignment_direction"] * df["cci_z"]) > 0)  # CCI direction matches flow
+        (df["cci_z"].abs() > z_threshold) &     # CCI must be meaningful
+        dealer_has_conviction &                  # Dealers adding in direction of bias
+        (~df["is_roll_week"])                    # Not contaminated by roll
     )
 
     # Conflict signal (contrarian opportunity when strong divergence but CCI neutral)
