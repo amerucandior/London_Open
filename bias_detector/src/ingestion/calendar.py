@@ -56,7 +56,7 @@ log = structlog.get_logger(__name__)
 
 # ForexFactory publishes a clean JSON for the current & next week
 FF_JSON_URL   = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-FF_NEXT_URL   = "https://nfs.faireconomy.media/ff_calendar_nextweek.json"
+FF_NEXT_URL   = "https://nfs.faireconomy.media/ff_calendar_nextweek.json" # Does not work
 FF_HTML_URL   = "https://www.forexfactory.com/calendar"
 
 # Currencies we care about
