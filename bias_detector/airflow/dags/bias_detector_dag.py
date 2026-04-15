@@ -60,7 +60,7 @@ def fx_bias_detector():
 
     @task
     def publish_task(score):
-        return emit_all(score=score)
+        return emit_all(score)
 
     # Define execution flow via function calls
     ohlcv_data = ingest_ohlcv_task("EURUSD=X")

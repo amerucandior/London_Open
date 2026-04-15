@@ -1,5 +1,4 @@
 import pandas as pd
-import _add_positioning_momentum
 
 def calculate_position_size(base_size: float, cot_row: pd.Series) -> float:
     """
