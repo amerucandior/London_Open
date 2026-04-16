@@ -208,8 +208,8 @@ def _extract_csv_from_zip(zip_bytes: bytes, year: int) -> str:
         names = zf.namelist()
         log.debug("cot.zip.contents", files=names)
 
-        # Prioritize XLS files as they are causing the current issue
-        xls_files = [n for n in names if n.lower().endswith(".xls")]
+        # Prioritize XLS files since CFTC data is downloaded as xlsx
+        xls_files = [_ for _ in names if _.lower().endswith(".xls")]
         if xls_files:
             target = xls_files[0]
             log.info("cot.zip.extract", file=target, format="xls")
