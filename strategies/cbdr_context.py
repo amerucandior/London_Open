@@ -1,0 +1,84 @@
+"""
+Load prior NY-session M5 data and run CBDR + LoD/HoD projection for London Open.
+"""
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta, timezone
+from typing import Any
+
+import MetaTrader5 as mt5
+import pandas as pd
+from zoneinfo import ZoneInfo
+
+import centralbank_dealers_range as cbdr_mod
+import config
+from utils.mt5_utils import MT5Connection
+
+
+def _reference_ny_date_for_cbdr(anchor_utc: datetime) -> date:
+    """
+    NY calendar date of the **last completed** 14:00–20:00 CBDR window relative to ``anchor_utc``.
+    """
+    ny = ZoneInfo("America/New_York")
+    t = anchor_utc.astimezone(ny)
+    close_today = t.replace(hour=20, minute=0, second=0, microsecond=0)
+    if t >= close_today:
+        return t.date()
+    return t.date() - timedelta(days=1)
+
+
+def load_cbdr_m5_dataframe(symbol: str, ny_date: date) -> pd.DataFrame:
+    """M5 bars from NY ``ny_date`` 14:00 to 20:00 (America/New_York), ``time`` column UTC."""
+    ny = ZoneInfo("America/New_York")
+    start_ny = datetime(ny_date.year, ny_date.month, ny_date.day, 14, 0, tzinfo=ny)
+    end_ny = datetime(ny_date.year, ny_date.month, ny_date.day, 20, 0, tzinfo=ny)
+    start_utc = start_ny.astimezone(timezone.utc).replace(tzinfo=None)
+    end_utc = end_ny.astimezone(timezone.utc).replace(tzinfo=None)
+
+    with MT5Connection() as conn:
+        raw = conn.copy_rates_range(symbol, mt5.TIMEFRAME_M5, start_utc, end_utc)
+
+    if raw is None or len(raw) == 0:
+        raise RuntimeError(
+            f"No M5 bars for {symbol} CBDR window {ny_date} 14:00–20:00 NY → UTC {start_utc}–{end_utc}"
+        )
+
+    df = pd.DataFrame(raw)
+    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    for col in ("open", "high", "low", "close"):
+        df[col] = df[col].astype(float)
+    return df[["time", "open", "high", "low", "close"]]
+
+
+def cbdr_block_for_london_open(
+    symbol: str,
+    anchor_utc: datetime,
+    *,
+    direction_bias: int,
+) -> dict[str, Any]:
+    """
+    CBDR stats + LoD/HoD projection for ``direction_bias`` (from COT regime).
+
+    Returns ``{"ok": False, "error": ...}`` on failure so callers can still return a plan.
+    """
+    cfg = config.config.get("cbdr", {})
+    try:
+        ny_d = _reference_ny_date_for_cbdr(anchor_utc)
+        df = load_cbdr_m5_dataframe(symbol, ny_d)
+        raw = cbdr_mod.cbdr_range(
+            df,
+            symbol,
+            use_wicks=bool(cfg.get("use_wicks", False)),
+            ideal_min=float(cfg.get("ideal_min_pips", 20)),
+            ideal_max=float(cfg.get("ideal_max_pips", 30)),
+            max_allowed=float(cfg.get("max_allowed_pips", 40)),
+        )
+        proj = cbdr_mod.lod_hod_projection(raw, direction_bias)
+        return {
+            "ok": True,
+            "reference_ny_date": ny_d.isoformat(),
+            "cbdr": raw,
+            "lod_hod": proj,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "reference_ny_date": None}

@@ -1,20 +1,23 @@
-"""
-src/ingestion/__init__.py
-─────────────────────────
-FX Bias Detector — ingestion package.
-"""
+"""Ingestion used by London_Open strategies: COT + economic calendar."""
 
-from .calendar  import fetch_calendar, fetch_upcoming_events
-from .cot       import fetch_cot, fetch_cot_all_pairs, get_latest_cot
-from .sentiment import fetch_sentiment, fetch_sentiment_all_pairs, get_sentiment_signal
+from .calendar import fetch_calendar, fetch_upcoming_events, FREDClient
+from .cot import (
+    COTStrategyContext,
+    fetch_cot,
+    fetch_cot_all_pairs,
+    get_cot_strategy_context,
+    get_latest_cot,
+    list_cot_pairs,
+)
 
 __all__ = [
     "fetch_calendar",
     "fetch_upcoming_events",
+    "FREDClient",
+    "COTStrategyContext",
     "fetch_cot",
     "fetch_cot_all_pairs",
+    "get_cot_strategy_context",
     "get_latest_cot",
-    "fetch_sentiment",
-    "fetch_sentiment_all_pairs",
-    "get_sentiment_signal",
+    "list_cot_pairs",
 ]

@@ -1,18 +1,36 @@
-# asian_range.py
 # ----------------------------------------------------------------------
-# Pure python code that *does not* touch MT5 at import time.
+# MT5 helpers — connection only inside ``MT5Connection`` context.
 # ----------------------------------------------------------------------
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict
+from typing import Any, Dict
 
-from .mt5_utils import MT5Connection, mt5
+import MetaTrader5 as mt5
+
+
+class MT5Connection:
+    """Initialize MT5 on enter and shut down on exit."""
+
+    def __enter__(self) -> "MT5Connection":
+        if not mt5.initialize():
+            raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        mt5.shutdown()
+
+    def copy_rates_range(
+        self,
+        symbol: str,
+        timeframe: int,
+        date_from: datetime,
+        date_to: datetime,
+    ):
+        return mt5.copy_rates_range(symbol, timeframe, date_from, date_to)
 
 
 def _calc_asian_stats(rates) -> tuple[float, float, float]:
-    """Given a ``numpy.ndarray`` of MT5 rates, compute high/low/mid."""
-    # The shape of ``rates`` is (n, 6) – columns: time, open, high, low, close, volume
     high = float(rates["high"].max())
     low = float(rates["low"].min())
     mid = (high + low) / 2.0
@@ -26,17 +44,11 @@ def compute_asian_range(
     timeframe: int = mt5.TIMEFRAME_H1,
 ) -> Dict[str, float]:
     """
-    Fetch hourly candles for *symbol* between *start_dt* and *end_dt*,
-    then return the Asian session high / low / mid.
-
-    The function **does not** create any global side-effects.
+    Hourly candles between ``start_dt`` and ``end_dt`` (UTC) → Asian high / low / mid.
     """
     if start_dt is None or end_dt is None:
         raise ValueError("Both start_dt and end_dt must be supplied")
 
-    # ------------------------------------------------------------------
-    # The *only* place where we talk to MT5 is inside the context.
-    # ------------------------------------------------------------------
     with MT5Connection() as conn:
         rates = conn.copy_rates_range(symbol, timeframe, start_dt, end_dt)
 

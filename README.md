@@ -1,83 +1,21 @@
-# LondonOpen
+# London Open
 
-A Python-based automated trading analysis tool for MetaTrader 5, specializing in forex trading strategies around the London market opening. This project implements various technical analysis components to identify trading opportunities during the volatile London session.
+Python tooling for **MetaTrader 5**-backed analysis around the **London session**: London Open breakout context, London Close mean-reversion context, Asian range, CBDR (central bank dealers range), COT positioning, and economic calendar filters.
 
-## Features
+## Layout
 
-- **Session Management**: Tracks Asian and London trading sessions with UTC-based timing
-- **Asian Range Calculation**: Computes high, low, and midpoint prices during the Asian session (00:00-06:00 UTC)
-- **Liquidity Sweep Detection**: Identifies rapid price movements through thin liquidity zones with volume spikes
-- **Overextension Entry Model**: Measures price deviation from EMA50 to detect overextended market conditions
-- **Economic Calendar Integration**: Placeholder for economic event monitoring (future implementation)
-- **MT5 Integration**: Direct connection to MetaTrader 5 for real-time data and trading
+- **`strategies/`** — `london_open_plan`, `london_close_plan`, CBDR wiring, shared market context.
+- **`bias_detector/src/`** — `ingestion` (COT, calendar) and `signals` (regime); added to `sys.path` at runtime via `strategies/_bias_path.py`.
+- **Root modules** — `main.py`, `config.py`, `session.py`, `asian_range.py`, etc.
 
-## Components
+## Requirements
 
-### Core Modules
-- `main.py`: Main entry point with MT5 initialization and symbol validation
-- `config.py`: Configuration settings for sessions, trade limits, and spreads
-- `session.py`: Session timing and trade permission logic
+Python 3.12+, dependencies in `pyproject.toml`. **MetaTrader5** is Windows-oriented; install and run MT5-backed paths on a supported platform.
 
-### Analysis Modules
-- `asian_range.py`: Calculates Asian session price ranges
-- `liquidity_sweep.py`: Detects liquidity sweeps using price and volume analysis
-- `economic_calendar.py`: Economic event calendar (currently placeholder)
+## Run
 
-### Entry Models
-- `entry-model/overextension.py`: Overextension factor based on EMA50 deviation
+```bash
+python main.py
+```
 
-## Installation
-
-1. Ensure you have Python 3.12 or higher installed
-2. Install MetaTrader 5 platform
-3. Clone this repository
-4. Install dependencies:
-   ```bash
-   uv pip install -r requirements.txt
-   ```
-   Or if using pyproject.toml:
-   ```bash
-   uv pip install -e .
-   ```
-
-## Dependencies
-
-- MetaTrader5
-- pandas
-- numpy
-- pytz
-
-## Configuration
-
-Edit `config.py` to customize:
-- Session times (UTC)
-- Trade limits
-- Spread limits
-
-## Usage
-
-1. Ensure MetaTrader 5 is running
-2. Run the main script:
-   ```bash
-   python main.py
-   ```
-
-## Trading Strategy Overview
-
-The system focuses on the London open (07:00-16:00 UTC) and uses:
-- Asian range as reference levels
-- Liquidity sweeps for entry signals
-- Overextension to avoid entering during extreme moves
-- Session timing to restrict trading to optimal hours
-
-## Disclaimer
-
-This is a trading analysis tool for educational and research purposes. Use at your own risk. Always test strategies in a demo environment before live trading.
-
-## License
-
-[
-Copyright (c) [2026] [Ian Mwirigi]. 
-All rights reserved.
-No part of this software may be used, reproduced, or distributed without the prior written permission of the author.
-]
+Configure sessions and windows in `config.py` (`session_clock`).

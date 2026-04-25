@@ -1,9 +1,10 @@
 import io
 import os
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import pandas as pd
 import requests
@@ -37,10 +38,18 @@ log = structlog.get_logger(__name__)
 CFTC_BASE_URL  = "https://www.cftc.gov/files/dea/history/fut_fin_xls_{year}.zip"
 OUTPUT_DIR     = Path(os.getenv("DATA_DIR", "data/raw/cot"))
 
-# Contract names as they appear in the CFTC CSV (partial match, case-insensitive)
+# Contract names as they appear in the CFTC disaggregated “Market and Exchange Names”
+# column (substring match, case-insensitive). Keep phrases specific enough not to match
+# the wrong contract when multiple “DOLLAR” products exist.
 CONTRACT_MAP: dict[str, str] = {
     "EURUSD": "EURO FX",
     "GBPUSD": "BRITISH POUND",
+    "USDJPY": "JAPANESE YEN",
+    "USDCHF": "SWISS FRANC",
+    "AUDUSD": "AUSTRALIAN DOLLAR",
+    "USDCAD": "CANADIAN DOLLAR",
+    "NZDUSD": "NEW ZEALAND DOLLAR",
+    "USDMXN": "MEXICAN PESO",
 }
 
 # CFTC CSV column aliases
@@ -83,6 +92,29 @@ STALE_THRESHOLD_DAYS = 10
 
 # Rolling window for z-score (weeks)
 ZSCORE_WINDOW = 52
+
+# Minimum |cci_z| to call a non-zero ``COTStrategyContext.weekly_bias`` (align with ``RegimeConfig.cci_weak``).
+CCI_WEEKLY_BIAS_THRESHOLD: float = 0.8
+
+
+def list_cot_pairs() -> list[str]:
+    """Symbols supported by ``fetch_cot`` / ``get_latest_cot`` (CFTC disaggregated FX)."""
+    return sorted(CONTRACT_MAP.keys())
+
+
+def cot_report_lag_days(report_date: str) -> Optional[int]:
+    """
+    Calendar days from COT **as-of** (Tuesday in the report) to today (UTC).
+
+    CFTC publishes Friday ~15:30 ET; intraday strategies should treat ``lag_days``
+    as structural delay (London Open / London Close gates, etc.).
+    """
+    ts = pd.to_datetime(str(report_date).zfill(6), format="%y%m%d", errors="coerce")
+    if pd.isna(ts):
+        return None
+    rep = ts.date()
+    today = datetime.now(timezone.utc).date()
+    return max(0, (today - rep).days)
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -202,21 +234,52 @@ def _download_cftc_zip(year: int) -> bytes:
     return content
 
 
+def _read_cftc_table_bytes(content: bytes, filename: str) -> pd.DataFrame:
+    """
+    Load a CFTC workbook from ZIP bytes.
+
+    Recent CFTC ``fut_fin_xls_{year}.zip`` bundles use ``.xlsx`` (needs **openpyxl**).
+    Legacy ``.xls`` may require **xlrd** (``pip install xlrd``).
+    """
+    fn = filename.lower()
+    buf = io.BytesIO(content)
+
+    if fn.endswith((".xlsx", ".xlsm")):
+        try:
+            return pd.read_excel(buf, engine="openpyxl")
+        except ImportError as exc:
+            raise RuntimeError(
+                "COT: reading .xlsx from CFTC ZIP requires 'openpyxl'. "
+                "Install with: pip install openpyxl"
+            ) from exc
+
+    if fn.endswith(".xls"):
+        try:
+            return pd.read_excel(buf, engine="xlrd")
+        except ImportError as exc:
+            raise RuntimeError(
+                "COT: legacy .xls inside CFTC ZIP requires 'xlrd'. "
+                "Install: pip install xlrd   (or rely on recent years that ship .xlsx.)"
+            ) from exc
+
+    raise ValueError(f"COT: unsupported workbook extension for {filename!r}")
+
+
 def _extract_csv_from_zip(zip_bytes: bytes, year: int) -> str:
-    """Extract the main data file (CSV, TXT, or XLS) from a CFTC ZIP file."""
+    """Extract the main data file (CSV, TXT, or XLS/XLSX) from a CFTC ZIP file."""
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         names = zf.namelist()
         log.debug("cot.zip.contents", files=names)
 
-        # Prioritize XLS files since CFTC data is downloaded as xlsx
-        xls_files = [_ for _ in names if _.lower().endswith(".xls")]
-        if xls_files:
-            target = xls_files[0]
-            log.info("cot.zip.extract", file=target, format="xls")
-            # Read the XLS file into a pandas DataFrame
-            xls_content = zf.read(target)
-            df = pd.read_excel(io.BytesIO(xls_content))
-            # Convert to CSV string, as downstream expects CSV format
+        excel_files = [n for n in names if n.lower().endswith((".xlsx", ".xlsm", ".xls"))]
+        # Prefer modern .xlsx over legacy .xls when both exist
+        excel_files.sort(key=lambda x: (not x.lower().endswith(".xlsx"), x.lower()))
+
+        if excel_files:
+            target = excel_files[0]
+            log.info("cot.zip.extract", file=target, format=target.lower().rsplit(".", 1)[-1])
+            raw = zf.read(target)
+            df = _read_cftc_table_bytes(raw, target)
             return df.to_csv(index=False)
 
         csv_files = [n for n in names if n.lower().endswith(".csv")]
@@ -279,7 +342,7 @@ def _filter_contracts(df: pd.DataFrame, pair: str) -> pd.DataFrame:
     """Return rows matching the target contract for the given pair."""
     keyword = CONTRACT_MAP.get(pair.upper(), "")
     if not keyword:
-        raise ValueError(f"Unknown pair: {pair}. Supported: {list(CONTRACT_MAP.keys())}")
+        raise ValueError(f"Unknown pair: {pair}. Supported: {list_cot_pairs()}")
 
     mask = df["contract_name"].str.contains(keyword, case=False, na=False)
     filtered = df[mask].copy()
@@ -419,7 +482,7 @@ def fetch_cot(
     Parameters
     ----------
     pair            : str
-        "EURUSD" or "GBPUSD"
+        Any key from ``CONTRACT_MAP`` (see ``list_cot_pairs()``).
     lookback_years  : int
         How many years of history to load (min 1, max 5)
     use_cache       : bool
@@ -440,7 +503,7 @@ def fetch_cot(
     """
     pair = pair.upper()
     if pair not in CONTRACT_MAP:
-        raise ValueError(f"Unsupported pair: {pair}. Use: {list(CONTRACT_MAP.keys())}")
+        raise ValueError(f"Unsupported pair: {pair}. Supported: {list_cot_pairs()}")
 
     current_year = datetime.now().year
     years = list(range(current_year - lookback_years + 1, current_year + 1))
@@ -576,6 +639,103 @@ def get_latest_cot(pair: str = "EURUSD") -> Optional[pd.Series]:
 
     )
     return latest
+
+
+@dataclass(frozen=True)
+class COTStrategyContext:
+    """
+    Latest COT snapshot for **weekly directional bias** and **mean reversion / squeeze** ideas.
+
+    - **weekly_bias** uses ``cci_z`` (dealer vs asset-manager tilt). Same spirit as
+      ``classify_regime`` but simplified to {-1, 0, +1} for strategy wiring.
+    - **mean_reversion_hint** flags leveraged-money crowding (fade rules are yours;
+      spot can extend before mean reversion).
+    - **usable** is False when ``quality_flag`` is stale (2) or ``is_roll_transition``,
+      so callers skip gating on garbage rows.
+
+    COT is weekly (Tuesday as-of, Friday release); ``lag_days`` is calendar age of
+    the report — combine with session logic (e.g. London Close ~13:00 EAT) explicitly.
+    """
+
+    pair: str
+    as_of_report_date: str
+    lag_days: int
+    quality_flag: int
+    is_roll_week: bool
+    is_roll_transition: bool
+    cci_z: float
+    lev_z: float
+    dealer_net: int
+    dealer_net_pct: float
+    lev_money_net_pct: float
+    is_crowded_long: bool
+    is_crowded_short: bool
+    regime_confirmed: bool
+    signal_strength: float
+    weekly_bias: Literal[-1, 0, 1]
+    mean_reversion_hint: Optional[Literal["fade_crowded_long", "fade_crowded_short"]]
+    usable: bool
+
+
+def get_cot_strategy_context(
+    pair: str,
+    *,
+    cci_bias_threshold: float = CCI_WEEKLY_BIAS_THRESHOLD,
+) -> Optional[COTStrategyContext]:
+    """
+    Package the latest COT row for London Open bias, London Close MR, or dashboards.
+
+    Returns ``None`` if no data. When ``usable`` is False, still returns context for
+    logging but callers should not trade off ``weekly_bias`` / MR hints.
+    """
+    pair = pair.upper()
+    row = get_latest_cot(pair=pair)
+    if row is None:
+        return None
+
+    qf = int(row.get("quality_flag", 2))
+    roll_t = bool(row.get("is_roll_transition", False))
+    usable = qf < 2 and not roll_t
+
+    cci_z = float(row.get("cci_z", 0.0))
+    if abs(cci_z) < cci_bias_threshold:
+        w_bias: Literal[-1, 0, 1] = 0
+    else:
+        w_bias = 1 if cci_z > 0 else -1
+
+    crowded_long = bool(row.get("is_crowded_long", False))
+    crowded_short = bool(row.get("is_crowded_short", False))
+    if crowded_long:
+        mr_hint: Optional[Literal["fade_crowded_long", "fade_crowded_short"]] = "fade_crowded_long"
+    elif crowded_short:
+        mr_hint = "fade_crowded_short"
+    else:
+        mr_hint = None
+
+    lag = cot_report_lag_days(str(row.get("report_date", "")))
+    if lag is None:
+        lag = 0
+
+    return COTStrategyContext(
+        pair=pair,
+        as_of_report_date=str(row.get("report_date", "")),
+        lag_days=lag,
+        quality_flag=qf,
+        is_roll_week=bool(row.get("is_roll_week", False)),
+        is_roll_transition=roll_t,
+        cci_z=cci_z,
+        lev_z=float(row.get("lev_z", 0.0)),
+        dealer_net=int(row.get("dealer_net", 0)),
+        dealer_net_pct=float(row.get("dealer_net_pct", 0.0)),
+        lev_money_net_pct=float(row.get("lev_money_net_pct", 0.0)),
+        is_crowded_long=crowded_long,
+        is_crowded_short=crowded_short,
+        regime_confirmed=bool(row.get("regime_confirmed", False)),
+        signal_strength=float(row.get("signal_strength", 0.0)),
+        weekly_bias=w_bias,
+        mean_reversion_hint=mr_hint,
+        usable=usable,
+    )
 
 
 def fetch_cot_all_pairs(lookback_years: int = 2) -> dict[str, pd.DataFrame]:

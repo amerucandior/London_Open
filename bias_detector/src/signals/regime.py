@@ -20,11 +20,7 @@ from typing import Optional
 import pandas as pd
 import structlog
 
-from src.ingestion.cot import fetch_cot
-
 log = structlog.get_logger(__name__)
-
-fetch_cot(pair="EURUSD", lookback_years=2, use_cache=True)
 
 # ── Regime States ─────────────────────────────────────────────────────────────
 

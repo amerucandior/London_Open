@@ -7,10 +7,15 @@ Data sources
 ────────────
   Primary   : ForexFactory JSON endpoint (free, no key required)
               https://nfs.faireconomy.media/ff_calendar_thisweek.json
+              (This feed is “this week” only — forward risk past week boundary needs
+              another source or rolling cache; see ``fetch_calendar`` docstring.)
 
-  Secondary : FRED API (St. Louis Fed) — historical actuals & revisions
+  Secondary : FRED API (St. Louis Fed) — latest published series observations
               https://fred.stlouisfed.org/docs/api/fred/
               Required: FRED_API_KEY in .env
+              FRED values are **context only**: they are not the same object as the
+              calendar line’s release-time print and are **never** used for
+              ``surprise_score`` / ``surprise_z`` (those use ForexFactory strings only).
 
 Output     : pd.DataFrame + Parquet cache
 
@@ -122,6 +127,174 @@ OUTPUT_DIR: Final[Path] = Path(os.getenv("DATA_DIR", "data/raw/calendar"))
 MIN_REQUEST_INTERVAL: Final[int] = 60  # Minimum seconds between FF requests
 CACHE_DURATION_HOURS: Final[int] = 6   # Cache duration in hours
 
+# Bumped when combined-calendar semantics change (e.g. FRED enrichment) so stale
+# Parquet is not served forever.
+CAL_COMBINED_CACHE_VERSION: Final[int] = 2
+_CAL_COMBINED_V_COL: Final[str] = "_cal_combined_v"
+
+# ``time`` field tokens → treat as whole-day bucket (UTC midnight on ``date``’s YYYY-MM-DD).
+# Do **not** include empty string — missing ``time`` means “use clock from ``date``”.
+_ALL_DAY_TOKENS: Final[frozenset[str]] = frozenset(
+    {"all day", "allday", "tentative", "tbc", "tba"}
+)
+
+
+def parse_economic_string_to_float(value: Optional[str]) -> Optional[float]:
+    """
+    Parse ForexFactory-style numeric strings for surprise math only.
+
+    Handles commas, trailing %, and K/M/B suffix multipliers (e.g. ``178K``, ``1.2M``).
+    Returns ``None`` for placeholders and non-numeric prose.
+    """
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    lower = raw.lower()
+    if lower in {"n/a", "na", "-", "–", "—", "tba", "tbd", "...", "tbc", "tentative"}:
+        return None
+
+    pct = raw.endswith("%")
+    s = raw[:-1] if pct else raw
+    s = s.replace(",", "").replace(" ", "")
+
+    mult = 1.0
+    if len(s) >= 2 and s[-1].upper() in "KMB" and (s[-2].isdigit() or s[-2] == "."):
+        suf = s[-1].upper()
+        mult = {"K": 1e3, "M": 1e6, "B": 1e9}[suf]
+        s = s[:-1]
+
+    s = re.sub(r"[^\d.\-+]", "", s)
+    if not s or s in {".", "+", "-", "+.", "-."}:
+        return None
+    try:
+        v = float(s) * mult
+        return v / 100.0 if pct else v
+    except ValueError:
+        return None
+
+
+def _fred_series_match(title_lower: str) -> Optional[tuple[str, str]]:
+    """
+    Map event title → FRED ``(series_id, label)`` using **longest** keyword match.
+
+    Longest substring wins, then lexicographic keyword tie-break for determinism.
+    This avoids ``"unemployment"`` stealing events that belong to
+    ``"unemployment claims"`` when dict iteration order was arbitrary.
+    """
+    best_rank: Optional[tuple[int, str]] = None  # (len(keyword), keyword) — max wins
+    best_pair: Optional[tuple[str, str]] = None
+
+    for keyword, pair in FRED_SERIES.items():
+        if keyword not in title_lower:
+            continue
+        rank = (len(keyword), keyword)
+        if best_rank is None or rank > best_rank:
+            best_rank, best_pair = rank, pair
+    return best_pair
+
+
+def _parse_event_to_utc_timestamp(date: str, time: Optional[str]) -> pd.Timestamp:
+    """
+    Normalise FF ``date`` (+ optional ``time``) to a UTC pandas timestamp.
+
+    - Full ISO in ``date`` → parsed in UTC (or with offset, then converted).
+    - ``time`` in ``_ALL_DAY_TOKENS`` → ``YYYY-MM-DD`` from ``date`` at 00:00 UTC.
+    - If ``date`` has no time and ``time`` is a clock like ``13:30``, combine as UTC
+      (FF is ambiguous here — prefer full ISO in ``date`` when available).
+    """
+    d = (date or "").strip()
+    tm_raw = (time or "").strip()
+    tm = tm_raw.lower()
+
+    if not d:
+        return pd.NaT  # type: ignore[return-value]
+
+    if tm in _ALL_DAY_TOKENS:
+        return pd.to_datetime(d[:10] + "T00:00:00", utc=True, errors="coerce")
+
+    ts = pd.to_datetime(d, utc=True, errors="coerce")
+    if not pd.isna(ts):
+        return ts
+
+    if tm_raw:
+        combined = f"{d[:10]}T{tm_raw}"
+        return pd.to_datetime(combined, utc=True, errors="coerce")
+
+    return pd.to_datetime(d[:10] + "T00:00:00", utc=True, errors="coerce")
+
+
+def _validate_calendar_date_string(v: str) -> bool:
+    """True if ``v`` yields a non-NaT event timestamp (possibly day-bucket)."""
+    return not pd.isna(_parse_event_to_utc_timestamp(v, None))
+
+
+def _combined_cache_usable(cached: pd.DataFrame) -> bool:
+    """
+    Reject old ``calendar_combined_*.parquet`` files that predate schema tagging,
+    so FRED enrichment is not skipped forever after a one-time bad save.
+    """
+    if cached is None or cached.empty:
+        return True
+    if _CAL_COMBINED_V_COL not in cached.columns:
+        log.info("calendar.cache.reject", reason="missing_schema_version")
+        return False
+    try:
+        v = int(cached[_CAL_COMBINED_V_COL].iloc[0])
+    except (TypeError, ValueError):
+        log.info("calendar.cache.reject", reason="invalid_schema_version")
+        return False
+    if v < CAL_COMBINED_CACHE_VERSION:
+        log.info(
+            "calendar.cache.reject",
+            reason="stale_schema_version",
+            cached_version=v,
+            required_version=CAL_COMBINED_CACHE_VERSION,
+        )
+        return False
+    return True
+
+
+def _tag_combined_cache_version(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out[_CAL_COMBINED_V_COL] = CAL_COMBINED_CACHE_VERSION
+    return out
+
+
+def _nonblank_economic_field(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    t = str(value).strip()
+    if not t:
+        return False
+    return t.lower() not in {
+        "n/a", "na", "-", "–", "—", "tba", "tbd", "...", "tbc", "tentative",
+    }
+
+
+def _calendar_row_quality_flag(actual: Optional[str], forecast: Optional[str]) -> int:
+    """
+    Data-quality code for calendar rows (extends NaN checks with parseability).
+
+    0 = both actual & forecast parse as numbers (post-release surprise usable).
+    1 = pre-release / no actual (forecast may still be present).
+    2 = missing or blank forecast.
+    3 = forecast present but not parseable as a number.
+    4 = actual present but not parseable as a number.
+    """
+    has_f = _nonblank_economic_field(forecast)
+    has_a = _nonblank_economic_field(actual)
+    if not has_f:
+        return 2
+    if not has_a:
+        return 1
+    if parse_economic_string_to_float(forecast) is None:
+        return 3
+    if parse_economic_string_to_float(actual) is None:
+        return 4
+    return 0
+
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
@@ -137,10 +310,12 @@ class CalendarEvent(BaseModel):
     actual:           Optional[str]   = None
     forecast:         Optional[str]   = None
     previous:         Optional[str]   = None
-    fred_series_id:   Optional[str]   = None           # matched FRED series
-    fred_actual:      Optional[float] = None           # latest FRED revised value
-    fred_previous:    Optional[float] = None           # previous FRED value for comparison
-    surprise_z:       Optional[float] = None           # populated post-fetch
+    fred_series_id:   Optional[str]   = None           # matched FRED series (longest keyword)
+    # Latest / prior FRED *series* observations — not tied to this event’s release instant;
+    # never mixed into ``surprise_score`` (FF actual vs forecast only).
+    fred_actual:      Optional[float] = None
+    fred_previous:    Optional[float] = None
+    surprise_z:       Optional[float] = None           # from FF surprise only (see surprise_score)
     is_high_priority: bool            = False
     source:           str             = "forexfactory"  # Track data source
 
@@ -160,14 +335,11 @@ class CalendarEvent(BaseModel):
     @field_validator("date")
     @classmethod
     def valid_date(cls, v: str) -> str:
-        """Accept ISO 8601 and common ForexFactory date formats."""
-        for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d", "%m-%d-%Y"):
-            try:
-                datetime.strptime(v[:10], "%Y-%m-%d")
-                return v
-            except ValueError:
-                continue
+        """Must yield a usable event timestamp when combined with FF ``date`` formats."""
+        v = str(v).strip()
         if not v:
+            raise ValueError("Cannot parse empty date")
+        if not _validate_calendar_date_string(v):
             raise ValueError(f"Cannot parse date: {v!r}")
         return v
 
@@ -179,16 +351,16 @@ class CalendarEvent(BaseModel):
 
     def surprise_score(self) -> Optional[float]:
         """
-        Scalar surprise: actual minus forecast.
-        Returns None if either value is missing or non-numeric.
+        Scalar surprise: **ForexFactory** ``actual`` minus ``forecast`` only.
+
+        FRED fields are ignored — their latest observation is not the same object
+        as the number released at this event’s timestamp.
         """
-        try:
-            actual_val = self.fred_actual if self.fred_actual is not None else self.actual
-            a = float(re.sub(r"[%KMBkm]", "", str(actual_val or "")))
-            f = float(re.sub(r"[%KMBkm]", "", self.forecast or ""))
-            return round(a - f, 4)
-        except (TypeError, ValueError):
+        a = parse_economic_string_to_float(self.actual)
+        f = parse_economic_string_to_float(self.forecast)
+        if a is None or f is None:
             return None
+        return round(a - f, 4)
 
     def to_series(self) -> pd.Series:
         return pd.Series(self.model_dump())
@@ -271,22 +443,23 @@ def _save_ff_cache(data: list[dict]) -> None:
 
 
 @_RETRY
-def _fetch_ff_json(url: str) -> list[dict]:
+def _fetch_ff_json(url: str, *, bust_json_cache: bool = False) -> list[dict]:
     """
     Fetch the ForexFactory weekly calendar JSON with rate limiting.
     
     Parameters
     ----------
     url : FF_JSON_THIS_WEEK
+    bust_json_cache : If True, skip the on-disk FF JSON cache and re-download.
 
     Returns
     -------
     List of raw event dicts from the feed.
     """
-    # Check cache first
-    cached_data = _load_ff_cache()
-    if cached_data is not None:
-        return cached_data
+    if not bust_json_cache:
+        cached_data = _load_ff_cache()
+        if cached_data is not None:
+            return cached_data
     
     # Rate limiting - add delay between requests
     last_request_file = OUTPUT_DIR / ".ff_last_request"
@@ -345,9 +518,16 @@ def _parse_ff_json(raw: list[dict]) -> list[CalendarEvent]:
             if impact_raw not in (*IMPACT_MAP, "Holiday"):
                 impact_raw = "Low"
 
+            time_raw = raw_event.get("time")
+            time_clean: Optional[str] = None
+            if time_raw is not None:
+                ts = str(time_raw).strip()
+                time_clean = ts if ts else None
+
             ev = CalendarEvent(
                 event_id = f"FF_{raw_event.get('date', '')}_{raw_event.get('title', '')}",
                 date     = raw_event.get("date", ""),
+                time     = time_clean,
                 currency = currency,
                 impact   = impact_raw,
                 title    = raw_event.get("title", "Unknown"),
@@ -472,7 +652,11 @@ def _enrich_with_fred(
     fred_client: FREDClient,
 ) -> list[CalendarEvent]:
     """
-    Attach the latest FRED revised actual to each CalendarEvent.
+    Attach latest FRED series observations for **research context** only.
+
+    Matching uses the **longest** title keyword in ``FRED_SERIES`` to reduce
+    wrong-series attachment. Values are still not release-synchronised with the
+    FF row — callers must not treat ``fred_actual`` as the event’s “actual”.
     """
     if not fred_client.available:
         log.info("fred.enrich.skipped", reason="no API key")
@@ -483,22 +667,19 @@ def _enrich_with_fred(
 
     for ev in events:
         title_lower = ev.title.lower()
+        matched = _fred_series_match(title_lower)
+        if matched is None:
+            continue
 
-        # Find first matching FRED series
-        matched_series: Optional[str] = None
-        for keyword, (series_id, _label) in FRED_SERIES.items():
-            if keyword in title_lower:
-                matched_series = series_id
-                ev.fred_series_id = series_id
-                break
+        series_id, _label = matched
+        ev.fred_series_id = series_id
 
-        if matched_series and matched_series not in fred_cache:
-            fred_cache[matched_series] = fred_client.get_latest_values(matched_series, n=2)
+        if series_id not in fred_cache:
+            fred_cache[series_id] = fred_client.get_latest_values(series_id, n=2)
 
-        if matched_series:
-            latest, previous = fred_cache.get(matched_series, (None, None))
-            ev.fred_actual = latest
-            ev.fred_previous = previous
+        latest, previous = fred_cache.get(series_id, (None, None))
+        ev.fred_actual = latest
+        ev.fred_previous = previous
 
     return _enrich_surprise_z_simple(events)
 
@@ -535,12 +716,14 @@ def _to_dataframe(events: list[CalendarEvent]) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = pd.DataFrame([e.model_dump() for e in events])
-    df["datetime"]    = pd.to_datetime(df["date"], errors="coerce", utc=True)
+    df["datetime"] = [
+        _parse_event_to_utc_timestamp(str(ev.date), ev.time) for ev in events
+    ]
     df["impact_score"] = df["impact"].map(IMPACT_MAP).fillna(0).astype(int)
 
-    df["quality_flag"] = 0
-    df.loc[df["actual"].isna(),   "quality_flag"] = 1
-    df.loc[df["forecast"].isna(), "quality_flag"] = 2
+    df["quality_flag"] = [
+        _calendar_row_quality_flag(ev.actual, ev.forecast) for ev in events
+    ]
 
     return df.sort_values("datetime").reset_index(drop=True)
 
@@ -597,6 +780,15 @@ def fetch_calendar(
     """
     Main entry point — returns a cleaned, validated DataFrame of calendar events.
 
+    **Feed coverage:** the primary JSON URL is ForexFactory’s *this week* list only.
+    There is no second weekly endpoint in this module; retain a rolling Parquet
+    history or plug a paid calendar if you need clean forward coverage across
+    week boundaries (e.g. Sunday night vs Monday London).
+
+    **Surprise / FRED:** ``surprise_z`` uses ``CalendarEvent.surprise_score()``,
+    which is **ForexFactory actual minus forecast only**. FRED columns are
+    informational (latest series observation), not the release-time print.
+
     Parameters
     ----------
     use_cache      : Return today's Parquet cache if available.
@@ -604,26 +796,36 @@ def fetch_calendar(
     min_impact     : Minimum impact level ("Low" includes everything).
     history_df     : Historical events DataFrame for z-score normalisation.
     fred_client    : Pre-initialised FREDClient (creates one if not supplied).
-    force_refresh  : Force refresh from FF even if cache is valid.
+    force_refresh  : If True, skip the combined Parquet cache for today and skip
+                     the FF JSON disk cache so events are re-parsed and FRED
+                     enrichment runs again.
 
     Returns
     -------
-    pd.DataFrame with calendar events.
+    pd.DataFrame with calendar events, including:
+
+    - ``datetime`` — UTC timestamp from ``date`` + optional ``time`` (``All Day``
+      rows bucket to 00:00 UTC on the ``YYYY-MM-DD`` prefix of ``date``).
+    - ``quality_flag`` — ``0`` both sides parse for surprise; ``1`` missing
+      actual; ``2`` missing forecast; ``3`` / ``4`` unparsable forecast / actual.
     """
     if currencies is None:
         currencies = TARGET_CURRENCIES
 
-    # Check processed cache first
+    # Check processed cache first (must carry current schema version)
     if use_cache and not force_refresh:
         cached = _load_cached("combined")
-        if cached is not None:
-            return _filter(cached, currencies, min_impact)
+        if cached is not None and _combined_cache_usable(cached):
+            df_cached = cached.drop(columns=[_CAL_COMBINED_V_COL], errors="ignore")
+            return _filter(df_cached, currencies, min_impact)
+        if cached is not None and not _combined_cache_usable(cached):
+            log.info("calendar.cache.skip_stale_combined")
 
     # Fetch FF JSON
     events: list[CalendarEvent] = []
     
     try:
-        raw = _fetch_ff_json(FF_JSON_THIS_WEEK)
+        raw = _fetch_ff_json(FF_JSON_THIS_WEEK, bust_json_cache=force_refresh)
         parsed = _parse_ff_json(raw)
         events.extend(parsed)
     except Exception as exc:
@@ -634,7 +836,8 @@ def fetch_calendar(
             cached = _load_cached("combined")
             if cached is not None:
                 log.info("calendar.using_fallback_cache")
-                return _filter(cached, currencies, min_impact)
+                cc = cached.drop(columns=[_CAL_COMBINED_V_COL], errors="ignore")
+                return _filter(cc, currencies, min_impact)
         
         # Return empty DataFrame if all fails
         log.warning("calendar.empty_result")
@@ -658,6 +861,8 @@ def fetch_calendar(
     # FRED enrichment
     client = fred_client or FREDClient()
     unique = _enrich_with_fred(unique, client)
+    n_fred = sum(1 for ev in unique if ev.fred_series_id)
+    log.info("calendar.fred.enriched_rows", count=n_fred, total=len(unique))
 
     # Surprise z-scores
     if history_df is not None:
@@ -669,8 +874,10 @@ def fetch_calendar(
         log.warning("calendar.empty_result")
         return df
 
-    _save_parquet(df, "combined")
-    return _filter(df, currencies, min_impact)
+    df_versioned = _tag_combined_cache_version(df)
+    _save_parquet(df_versioned, "combined")
+    df_out = df_versioned.drop(columns=[_CAL_COMBINED_V_COL], errors="ignore")
+    return _filter(df_out, currencies, min_impact)
 
 
 def fetch_upcoming_events(
@@ -722,13 +929,19 @@ def fetch_fred_series_bulk(
 
 def clear_cache() -> None:
     """
-    Clear all cached data (both FF cache and processed Parquet).
+    Clear all cached data (FF JSON cache, combined calendar Parquet, rate limiter).
     Use this if you need fresh data immediately.
     """
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     ff_cache = _get_cache_file_path()
     if ff_cache.exists():
         ff_cache.unlink()
         log.info("cache.cleared", file=str(ff_cache))
+
+    for parquet_path in OUTPUT_DIR.glob("calendar_combined_*.parquet"):
+        parquet_path.unlink()
+        log.info("cache.cleared", file=str(parquet_path))
     
     # Also clear the rate limit file
     rate_limit_file = OUTPUT_DIR / ".ff_last_request"
@@ -758,9 +971,10 @@ def _run_cli_test() -> None:
         print(f"  Previous NFP: {prev}")
 
     print("\n── Full calendar (this week) ─────────────────────────────────────")
-    print("  Note: Using cached data if available to avoid rate limits")
-    
-    cal = fetch_calendar(use_cache=True, fred_client=fred)
+    print("  Note: Disk cache skipped once if schema is stale; use force_refresh=True")
+    print("        or clear_cache() for a full FF + FRED rebuild.")
+
+    cal = fetch_calendar(use_cache=True, fred_client=fred, force_refresh=False)
     
     if not cal.empty:
         print("\n📋 Recent Economic Events:")

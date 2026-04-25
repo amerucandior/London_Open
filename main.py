@@ -1,19 +1,33 @@
-# import MetaTrader5 as mt5
+"""
+Print **London Open breakout** vs **London Close mean reversion** plans (same day, different edges).
 
-# def validate_symbol(symbol):
-#     info = mt5.symbol_info(symbol)
-#     if info is None:
-#         raise ValueError(f"Symbol {symbol} not found in Market Watch.")
-#     if not info.visible:
-#         mt5.symbol_select(symbol, True)  # force-add to Market Watch
+Requires: pandas, requests, … (see pyproject) + MT5 for Asian range figures when available.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 
-# def initialize_mt5():
-#     if not mt5.initialize():
-#         raise RuntimeError(f"MT5 initialization failed: {mt5.last_error()}")
+def main() -> None:
+    pair = "EURUSD"
+    try:
+        from strategies.london_close import london_close_plan
+        from strategies.london_open import london_open_plan
+    except ImportError as exc:
+        print("Import failed — install dependencies:", exc)
+        sys.exit(1)
 
-def main():
-    print("Hello from londonopen!")
+    print("=== London Open BREAKOUT (impulse / range break) ===")
+    print(json.dumps(london_open_plan(pair), indent=2, default=str))
+    print()
+    print("=== London Close MEAN REVERSION (session unwind) ===")
+    print(json.dumps(london_close_plan(pair), indent=2, default=str))
 
 
 if __name__ == "__main__":

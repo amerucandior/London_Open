@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "londonopen"
 version = "0.1.0"
@@ -8,5 +12,27 @@ dependencies = [
     "MetaTrader5",
     "pandas",
     "numpy",
-    "pytz"
+    "pytz",
+    "openpyxl",
+    "requests",
+    "pydantic",
+    "structlog",
+    "tenacity",
+    "python-dotenv",
+]
+
+# Flat repo: explicit discovery avoids treating ``bias_detector/`` as a second
+# top-level package next to ``strategies/``.
+[tool.setuptools.packages.find]
+where = [".", "bias_detector/src"]
+include = ["strategies*", "ingestion*", "signals*", "utils*"]
+
+[tool.setuptools]
+py-modules = [
+    "main",
+    "config",
+    "session",
+    "asian_range",
+    "centralbank_dealers_range",
+    "liquidity_sweep",
 ]
