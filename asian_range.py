@@ -1,47 +1,29 @@
-"""
-Asian session high / low / mid (MT5) for the **session_clock.asian** window in London local time.
-"""
+"""Runtime layer that turns plan-generators into a live trading loop."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Optional
 
-import config
-from zoneinfo import ZoneInfo
+import MetaTrader5 as mt5
 
-from utils.mt5_utils import compute_asian_range
+from utils.mt5_utils import MT5Connection, compute_asian_range
 
 
-def get_today_asian_range(symbol: str, *, on: datetime | None = None) -> dict[str, float]:
+def get_today_asian_range(pair: str, on: datetime) -> Dict[str, float]:
     """
-    Asian range for the **calendar day** of ``on`` in ``session_clock.tz_name`` (default: now).
+    Return the Asian session high/low/mid for the same calendar day as ``on``.
 
-    Bounds follow ``config.session_clock.asian`` (default 00:00–07:00 local), converted to UTC
-    for ``copy_rates_range`` (assumes broker/server aligns with UTC; adjust if not).
+    ``on`` is expected to be a tz-aware datetime in the session-local timezone
+    (Europe/London). The Asian session runs 00:00–07:00 local time; we convert
+    both endpoints to UTC before fetching from MT5.
     """
-    clock = config.config.get("session_clock", {})
-    tz = ZoneInfo(str(clock.get("tz_name", "Europe/London")))
-    on = on or datetime.now(tz)
-    if on.tzinfo is None:
-        on = on.replace(tzinfo=tz)
-    else:
-        on = on.astimezone(tz)
-
-    a = clock.get(
-        "asian",
-        {"start_hour": 0, "start_minute": 0, "end_hour": 7, "end_minute": 0},
-    )
-    start_local = on.replace(
-        hour=int(a["start_hour"]),
-        minute=int(a["start_minute"]),
-        second=0,
-        microsecond=0,
-    )
-    end_local = on.replace(
-        hour=int(a["end_hour"]),
-        minute=int(a["end_minute"]),
-        second=0,
-        microsecond=0,
-    )
+    # Build session-local midnight and 07:00 on the same date as ``on``.
+    session_date = on.date()
+    tz = on.tzinfo
+    start_local = datetime(session_date.year, session_date.month, session_date.day,
+                           0, 0, tzinfo=tz)
+    end_local = datetime(session_date.year, session_date.month, session_date.day,
+                         7, 0, tzinfo=tz)
     start_utc = start_local.astimezone(timezone.utc).replace(tzinfo=None)
     end_utc = end_local.astimezone(timezone.utc).replace(tzinfo=None)
-    return compute_asian_range(symbol=symbol, start_dt=start_utc, end_dt=end_utc)
+    return compute_asian_range(pair, start_dt=start_utc, end_dt=end_utc)

@@ -125,7 +125,7 @@ OUTPUT_DIR: Final[Path] = Path(os.getenv("DATA_DIR", "data/raw/calendar"))
 
 # Rate limiting configuration
 MIN_REQUEST_INTERVAL: Final[int] = 60  # Minimum seconds between FF requests
-CACHE_DURATION_HOURS: Final[int] = 6   # Cache duration in hours
+CACHE_DURATION_HOURS: Final[int] = 12   # Cache duration in hours
 
 # Bumped when combined-calendar semantics change (e.g. FRED enrichment) so stale
 # Parquet is not served forever.
@@ -235,8 +235,10 @@ def _combined_cache_usable(cached: pd.DataFrame) -> bool:
     Reject old ``calendar_combined_*.parquet`` files that predate schema tagging,
     so FRED enrichment is not skipped forever after a one-time bad save.
     """
-    if cached is None or cached.empty:
+    if cached is None:
         return True
+    if cached.empty:
+        return False
     if _CAL_COMBINED_V_COL not in cached.columns:
         log.info("calendar.cache.reject", reason="missing_schema_version")
         return False
@@ -381,9 +383,9 @@ _SESSION.headers.update({
 })
 
 _RETRY = retry(
-    retry=retry_if_exception_type((requests.RequestException, TimeoutError)),
-    stop=stop_after_attempt(3),  # Reduced from 5 to avoid prolonged waits
-    wait=wait_exponential(multiplier=2, min=2, max=30),  # Reduced max from 60
+    retry=retry_if_exception_type((requests.RequestException, TimeoutError, ValueError)),
+    stop=stop_after_attempt(1),  # FF blocks for ~1 h if hit more than ~2x per 5 min
+    wait=wait_exponential(multiplier=2, min=2, max=30),
     before_sleep=before_sleep_log(
         logging.getLogger(__name__), logging.WARNING
     ),
@@ -486,6 +488,12 @@ def _fetch_ff_json(url: str, *, bust_json_cache: bool = False) -> list[dict]:
             raise requests.RequestException(f"Rate limited. Retry after {retry_after}s")
         
         resp.raise_for_status()
+        ct = resp.headers.get("Content-Type", "")
+        if "application/json" not in ct and "text/plain" not in ct:
+            raise ValueError(
+                f"FF returned unexpected Content-Type {ct!r} — "
+                "likely an HTML block/CAPTCHA page, not JSON"
+            )
         data: list[dict] = resp.json()
         
         # Save successful request timestamp
@@ -954,6 +962,9 @@ def clear_cache() -> None:
 
 def _run_cli_test() -> None:
     """Run CLI smoke test."""
+    import logging
+    logging.basicConfig(level=logging.DEBUG)
+    
     pd.set_option("display.max_columns", None)
     pd.set_option("display.width", 160)
 
@@ -974,7 +985,8 @@ def _run_cli_test() -> None:
     print("  Note: Disk cache skipped once if schema is stale; use force_refresh=True")
     print("        or clear_cache() for a full FF + FRED rebuild.")
 
-    cal = fetch_calendar(use_cache=True, fred_client=fred, force_refresh=False)
+    clear_cache()
+    cal = fetch_calendar(force_refresh=True, use_cache=False, fred_client=fred)
     
     if not cal.empty:
         print("\n📋 Recent Economic Events:")

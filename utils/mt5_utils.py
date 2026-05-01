@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import MetaTrader5 as mt5
 
@@ -29,6 +29,21 @@ class MT5Connection:
     ):
         return mt5.copy_rates_range(symbol, timeframe, date_from, date_to)
 
+    def copy_rates_from_pos(self, symbol: str, timeframe: int, start_pos: int, count: int):
+        return mt5.copy_rates_from_pos(symbol, timeframe, start_pos, count)
+
+    def symbol_info_tick(self, symbol: str):
+        return mt5.symbol_info_tick(symbol)
+
+    def symbol_info(self, symbol: str):
+        return mt5.symbol_info(symbol)
+
+    def positions_get(self, symbol: Optional[str] = None):
+        return mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
+
+    def order_send(self, request: dict):
+        return mt5.order_send(request)
+
 
 def _calc_asian_stats(rates) -> tuple[float, float, float]:
     high = float(rates["high"].max())
@@ -38,7 +53,7 @@ def _calc_asian_stats(rates) -> tuple[float, float, float]:
 
 
 def compute_asian_range(
-    symbol: str = "GBPUSD",
+    symbol: str,
     start_dt: datetime | None = None,
     end_dt: datetime | None = None,
     timeframe: int = mt5.TIMEFRAME_H1,

@@ -57,6 +57,17 @@ config = {
         "ideal_max_pips": 30,
         "max_allowed_pips": 40,
     },
-    "trade_limits": {},
-    "spread_limits": {},
+    # Per-day drawdown cap in account currency (0 = disabled).
+    # Max open positions: 1 per pair, 4 globally.
+    "trade_limits": {
+        "daily_loss_limit": 200.0,
+        "max_positions_per_pair": 1,
+        "max_positions_global": 4,
+    },
+    # Maximum allowable spread in pips before an order is rejected.
+    "spread_limits": {
+        "default_max_pips": 3.0,
+        "EURUSD": 2.0,
+        "GBPUSD": 2.5,
+    },
 }

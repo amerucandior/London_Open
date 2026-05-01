@@ -25,7 +25,7 @@ dependencies = [
 # top-level package next to ``strategies/``.
 [tool.setuptools.packages.find]
 where = [".", "bias_detector/src"]
-include = ["strategies*", "ingestion*", "signals*", "utils*"]
+include = ["strategies*", "ingestion*", "signals*", "utils*", "runtime*"]
 
 [tool.setuptools]
 py-modules = [
