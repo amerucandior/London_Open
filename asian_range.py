@@ -3,9 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
-
 import MetaTrader5 as mt5
-
 from utils.mt5_utils import MT5Connection, compute_asian_range
 
 

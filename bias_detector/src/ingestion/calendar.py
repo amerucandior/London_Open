@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Final, Literal, Optional
@@ -45,6 +46,8 @@ from tenacity import (
     wait_exponential,
 )
 
+from playwright.sync_api import sync_playwright
+
 # ── Environment & logging ─────────────────────────────────────────────────────
 
 load_dotenv()
@@ -58,6 +61,38 @@ structlog.configure(
     ]
 )
 log = structlog.get_logger(__name__)
+
+def _fetch_ff_via_browser(url: str) -> list[dict]:
+    def _run() -> list[dict]:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            try:
+                page = browser.new_page()
+                page.goto(
+                    "https://www.forexfactory.com/calendar",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                data = page.evaluate(
+                    """async ({ url }) => {
+                        const resp = await fetch(url);
+                        if (!resp.ok) {
+                            throw new Error(`FF browser fetch failed: ${resp.status}`);
+                        }
+                        return resp.json();
+                    }""",
+                    {"url": url},
+                )
+                if not isinstance(data, list):
+                    raise ValueError("FF browser fetch returned non-list payload")
+                return data
+            finally:
+                browser.close()
+
+    # Sync Playwright cannot run inside an active asyncio loop. Running it in a
+    # worker thread keeps this function usable from both sync and async callers.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(_run).result(timeout=60)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -126,6 +161,10 @@ OUTPUT_DIR: Final[Path] = Path(os.getenv("DATA_DIR", "data/raw/calendar"))
 # Rate limiting configuration
 MIN_REQUEST_INTERVAL: Final[int] = 60  # Minimum seconds between FF requests
 CACHE_DURATION_HOURS: Final[int] = 12   # Cache duration in hours
+
+# FRED request/circuit-breaker tuning (friendly defaults for notebook runtimes like Colab)
+FRED_TIMEOUT_SECONDS: Final[float] = float(os.getenv("FRED_TIMEOUT_SECONDS", "8"))
+FRED_TIMEOUT_COOLDOWN_SECONDS: Final[int] = int(os.getenv("FRED_TIMEOUT_COOLDOWN_SECONDS", "300"))
 
 # Bumped when combined-calendar semantics change (e.g. FRED enrichment) so stale
 # Parquet is not served forever.
@@ -479,22 +518,8 @@ def _fetch_ff_json(url: str, *, bust_json_cache: bool = False) -> list[dict]:
     log.info("calendar.ff_json.fetch", url=url)
     
     try:
-        resp = _SESSION.get(url, timeout=20)
-        
-        # Handle rate limiting
-        if resp.status_code == 429:
-            retry_after = int(resp.headers.get("Retry-After", MIN_REQUEST_INTERVAL))
-            log.warning("ff.rate_limited", retry_after=retry_after)
-            raise requests.RequestException(f"Rate limited. Retry after {retry_after}s")
-        
-        resp.raise_for_status()
-        ct = resp.headers.get("Content-Type", "")
-        if "application/json" not in ct and "text/plain" not in ct:
-            raise ValueError(
-                f"FF returned unexpected Content-Type {ct!r} — "
-                "likely an HTML block/CAPTCHA page, not JSON"
-            )
-        data: list[dict] = resp.json()
+        # Primary path: browser-context fetch (works around FF anti-bot blocks)
+        data = _fetch_ff_via_browser(url)
         
         # Save successful request timestamp
         last_request_file.write_text(str(time.time()))
@@ -562,6 +587,9 @@ class FREDClient:
 
     def __init__(self, api_key: Optional[str] = None) -> None:
         self._api_key = api_key or os.getenv("FRED_API_KEY")
+        self._timeout_seconds = max(1.0, FRED_TIMEOUT_SECONDS)
+        self._cooldown_seconds = max(30, FRED_TIMEOUT_COOLDOWN_SECONDS)
+        self._disabled_until_epoch = 0.0
         if not self._api_key:
             log.warning(
                 "fred.no_api_key",
@@ -573,6 +601,19 @@ class FREDClient:
     def available(self) -> bool:
         """True if an API key is configured."""
         return bool(self._api_key)
+
+    def _is_temporarily_unavailable(self) -> bool:
+        return time.time() < self._disabled_until_epoch
+
+    def _mark_temporarily_unavailable(self, reason: str, *, error: Optional[str] = None) -> None:
+        self._disabled_until_epoch = time.time() + self._cooldown_seconds
+        payload: dict[str, object] = {
+            "reason": reason,
+            "cooldown_seconds": self._cooldown_seconds,
+        }
+        if error:
+            payload["error"] = error
+        log.warning("fred.temporarily_unavailable", **payload)
 
     @_RETRY
     def get_observations(
@@ -586,6 +627,14 @@ class FREDClient:
         """
         if not self.available:
             log.error("fred.get_observations.no_key", series_id=series_id)
+            return pd.DataFrame()
+        if self._is_temporarily_unavailable():
+            remaining = int(max(0, self._disabled_until_epoch - time.time()))
+            log.info(
+                "fred.skipped_during_cooldown",
+                series_id=series_id,
+                seconds_remaining=remaining,
+            )
             return pd.DataFrame()
 
         params: dict = {
@@ -601,11 +650,12 @@ class FREDClient:
             resp = _SESSION.get(
                 f"{FRED_BASE_URL}/series/observations",
                 params=params,
-                timeout=20,
+                timeout=self._timeout_seconds,
             )
 
             if resp.status_code == 429:
                 log.warning("fred.rate_limited", series_id=series_id)
+                self._mark_temporarily_unavailable("rate_limited")
                 raise requests.RequestException("FRED rate limit hit (429)")
 
             if resp.status_code == 400:
@@ -619,8 +669,13 @@ class FREDClient:
             resp.raise_for_status()
             observations = resp.json().get("observations", [])
 
+        except requests.Timeout as exc:
+            self._mark_temporarily_unavailable("timeout", error=str(exc))
+            log.warning("fred.fetch_timeout", series_id=series_id, timeout_seconds=self._timeout_seconds)
+            return pd.DataFrame()
         except requests.RequestException as exc:
-            log.error("fred.fetch_failed", series_id=series_id, error=str(exc))
+            self._mark_temporarily_unavailable("request_exception", error=str(exc))
+            log.warning("fred.fetch_failed", series_id=series_id, error=str(exc))
             return pd.DataFrame()
 
         if not observations:
