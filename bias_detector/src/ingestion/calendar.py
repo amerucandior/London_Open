@@ -192,7 +192,7 @@ OUTPUT_DIR: Final[Path] = Path(os.getenv("DATA_DIR", "data/raw/calendar"))
 
 # Rate limiting configuration
 MIN_REQUEST_INTERVAL: Final[int] = 60  # Minimum seconds between FF requests
-CACHE_DURATION_HOURS: Final[int] = 12   # Cache duration in hours
+CACHE_DURATION_HOURS: Final[int] = 23   # Cache duration in hours
 
 # FRED request/circuit-breaker tuning (friendly defaults for notebook runtimes like Colab)
 FRED_TIMEOUT_SECONDS: Final[float] = float(os.getenv("FRED_TIMEOUT_SECONDS", "8"))
