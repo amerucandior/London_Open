@@ -27,7 +27,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 import time
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -73,9 +75,39 @@ def _fetch_ff_via_browser(url: str) -> list[dict]:
                     wait_until="domcontentloaded",
                     timeout=30000,
                 )
+
+                # Strategy 1: top-level navigation to JSON endpoint (avoids in-page CORS).
+                nav_resp = page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                if nav_resp and nav_resp.ok:
+                    try:
+                        data = nav_resp.json()
+                        if isinstance(data, list):
+                            return data
+                    except Exception:
+                        raw = page.content()
+                        cleaned = raw.replace("<html><head></head><body><pre>", "").replace("</pre></body></html>", "")
+                        try:
+                            data = json.loads(cleaned)
+                            if isinstance(data, list):
+                                return data
+                        except Exception:
+                            pass
+
+                # Strategy 2: browser request context with calendar referer.
+                api_resp = page.request.get(
+                    url,
+                    timeout=30000,
+                    headers={"Referer": "https://www.forexfactory.com/calendar"},
+                )
+                if api_resp.ok:
+                    data = api_resp.json()
+                    if isinstance(data, list):
+                        return data
+
+                # Strategy 3: last-resort in-page fetch.
                 data = page.evaluate(
                     """async ({ url }) => {
-                        const resp = await fetch(url);
+                        const resp = await fetch(url, { credentials: "omit" });
                         if (!resp.ok) {
                             throw new Error(`FF browser fetch failed: ${resp.status}`);
                         }
@@ -83,9 +115,9 @@ def _fetch_ff_via_browser(url: str) -> list[dict]:
                     }""",
                     {"url": url},
                 )
-                if not isinstance(data, list):
-                    raise ValueError("FF browser fetch returned non-list payload")
-                return data
+                if isinstance(data, list):
+                    return data
+                raise ValueError("FF browser fetch returned non-list payload")
             finally:
                 browser.close()
 
@@ -1077,7 +1109,3 @@ def _run_cli_test() -> None:
     for series_id, df in fred_data.items():
         print(f"\n{series_id} (latest {len(df)} observations):")
         print(df[["date", "value"]].to_string(index=False))
-
-
-if __name__ == "__main__":
-    _run_cli_test()

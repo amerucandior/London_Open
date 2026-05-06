@@ -19,7 +19,10 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+except Exception:  # pragma: no cover - fallback for Linux/Colab dev
+    from utils.mt5_stub import mt5
 
 import session
 from runtime.bar_feed import Bar, BarFeed

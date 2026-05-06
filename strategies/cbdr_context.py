@@ -6,7 +6,10 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+except Exception:  # pragma: no cover - fallback for Linux/Colab dev
+    from utils.mt5_stub import mt5
 import pandas as pd
 from zoneinfo import ZoneInfo
 

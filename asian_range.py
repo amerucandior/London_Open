@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+except Exception:  # pragma: no cover - fallback for Linux/Colab dev
+    from utils.mt5_stub import mt5
 from utils.mt5_utils import MT5Connection, compute_asian_range
 
 

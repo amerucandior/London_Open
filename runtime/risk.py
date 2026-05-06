@@ -13,7 +13,10 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+except Exception:  # pragma: no cover - fallback for Linux/Colab dev
+    from utils.mt5_stub import mt5
 
 import config
 from runtime.state import StateStore

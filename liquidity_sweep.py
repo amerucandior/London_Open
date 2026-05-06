@@ -14,7 +14,10 @@ import datetime as datetime
 
 import pandas as pd
 import numpy as np
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+except Exception:  # pragma: no cover - fallback for Linux/Colab dev
+    from utils.mt5_stub import mt5
 
 def fetch_mt5(symbol: str, timeframe, n_bars: int) -> pd.DataFrame:
     """

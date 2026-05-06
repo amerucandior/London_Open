@@ -8,7 +8,7 @@ import pandas as pd
 
 from . import _bias_path  # noqa: F401  — registers path before ingestion imports
 
-from ingestion.calendar import fetch_upcoming_events, FREDClient
+from ingestion.economic_calendar import fetch_upcoming_events, FREDClient
 from ingestion.cot import get_cot_strategy_context, list_cot_pairs
 
 

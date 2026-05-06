@@ -9,12 +9,13 @@ description = "A Python-based automated trading analysis tool for MetaTrader 5, 
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "MetaTrader5",
+    "MetaTrader5; sys_platform == 'win32'",
     "pandas",
     "numpy",
     "pytz",
     "openpyxl",
     "requests",
+    "playwright",
     "pydantic",
     "structlog",
     "tenacity",
