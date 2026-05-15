@@ -16,7 +16,6 @@ try:
     import MetaTrader5 as mt5
 except Exception:  # pragma: no cover - fallback for Linux/Colab dev
     from utils.mt5_stub import mt5
-import numpy as np
 import pandas as pd
 from datetime import time
 from zoneinfo import ZoneInfo
@@ -41,10 +40,13 @@ def cbdr_range(
         raise ValueError("df must contain columns: time, open, high, low, close")
 
     df = df.copy()
-    if not np.issubdtype(df["time"].dtype, np.datetime64):
+    # Use pandas-aware dtype check: np.issubdtype rejects `datetime64[ns, tz]`
+    # (a pandas DatetimeTZDtype) on numpy >= 2.0 with the obscure
+    # "Cannot interpret 'datetime64[ns, UTC]' as a data type" error.
+    if not pd.api.types.is_datetime64_any_dtype(df["time"]):
         df["time"] = pd.to_datetime(df["time"], utc=True)
     elif df["time"].dt.tz is None:
-        df["time"] = pd.to_datetime(df["time"], utc=True)
+        df["time"] = df["time"].dt.tz_localize("UTC")
     else:
         df["time"] = df["time"].dt.tz_convert("UTC")
 
