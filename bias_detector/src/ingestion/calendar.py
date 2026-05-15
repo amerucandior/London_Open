@@ -153,39 +153,40 @@ FRED_SERIES: Final[dict[str, tuple[str, str]]] = {
     "unemployment":     ("UNRATE",    "US Unemployment Rate (%)"),
     "cpi":              ("CPIAUCSL",  "US CPI All Urban (index)"),
     "core cpi":         ("CPILFESL",  "US Core CPI ex Food & Energy (index)"),
-    "core ppi":         ("PPIACO",    "US Core PPI (index)"),
+    "core ppi":         ("PPIFES",    "US Core PPI Final Demand ex Food & Energy (index)"),
     "ppi":              ("PPIACO",    "US PPI All Commodities (index)"),
-    "gdp":              ("GDP",       "US Real GDP (billions $)"),
+    "gdp":              ("GDPC1",     "US Real GDP (billions chained $)"),
     "fed funds":        ("FEDFUNDS",  "US Fed Funds Rate (%)"),
     "retail sales":     ("RSXFS",     "US Retail Sales ex Autos (millions $)"),
     "trade balance":    ("BOPGSTB",   "US Trade Balance (millions $)"),
     "industrial production": ("INDPRO", "US Industrial Production (index)"),
     "pce":              ("PCEPI",     "US PCE Price Index (index)"),
-    "empire state":     ("GACDIFNS066MNFRBNY", "NY Fed Empire State Index"),
-    "philly fed":       ("USPHCI",    "Philadelphia Fed Index"),
-    "nahb":             ("HNOUTHANR", "NAHB Housing Market Index"),
+    "empire state":     ("GACDISA066MSFRBNY", "NY Fed Empire State Index (SA)"),
+    "philly fed":       ("GACDFSA066MSFRBPHI", "Philadelphia Fed Manufacturing Index (SA)"),
+    # NAHB Housing Market Index is not published on FRED — fetch from NAHB directly.
+    # todo: fetch housing market index from NAHB directly, not from FRED.
     "existing home":    ("EXHOSLUSM495S", "Existing Home Sales"),
     "housing starts":   ("HOUST",     "Housing Starts"),
     "building permits": ("PERMIT",    "Building Permits"),
     "10-year":          ("DGS10",     "US 10-Year Treasury Yield (%)"),
     "2-year":           ("DGS2",      "US 2-Year Treasury Yield (%)"),
     "import prices":    ("IR",        "US Import Price Index"),
-    
+
     # Euro Area indicators
     "ecb":              ("ECBDFR",     "ECB Deposit Facility Rate (%)"),
-    "german":           ("DEUCPI01STM", "German CPI"),
-    "french":           ("FRACPI03TQM", "French CPI"),
-    "italian":          ("ITACPI03TQM", "Italian CPI"),
-    "euro area":        ("CP0000EZ17M086NEST", "Euro Area CPI Harmonised (index)"),
-    
+    "german":           ("CP0000DEM086NEST", "Germany HICP All-Items (index)"),
+    "french":           ("CP0000FRM086NEST", "France HICP All-Items (index)"),
+    "italian":          ("CP0000ITM086NEST", "Italy HICP All-Items (index)"),
+    "euro area":        ("CP0000EZ19M086NEST", "Euro Area HICP All-Items (index)"),
+
     # UK indicators
     "boe":              ("IUDSOIA",    "UK SONIA Rate (%)"),
-    "uk gdp":           ("NGDPMXGB",   "UK Real GDP"),
-    "manufacturing production": ("MANMM101UKM189S", "UK Manufacturing Production"),
-    
+    "uk gdp":           ("NGDPRSAXDCGBQ", "UK Real GDP (quarterly, SA)"),
+    "manufacturing production": ("GBRPRMNTO01GYSAQ", "UK Manufacturing Production (index, SA)"),
+
     # Exchange rates
     "eur/":             ("DEXUSEU",   "USD/EUR Exchange Rate"),
-    "gbp/":             ("DEXUSGB",   "USD/GBP Exchange Rate"),
+    "gbp/":             ("DEXUSUK",   "USD/GBP Exchange Rate"),
 }
 
 OUTPUT_DIR: Final[Path] = Path(os.getenv("DATA_DIR", "data/raw/calendar"))

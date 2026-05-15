@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from signals import RegimeOutput, RegimeState
 from . import _bias_path  # noqa: F401
 from .market_context import calendar_context, cot_context_for_pair
 
@@ -120,7 +121,7 @@ def london_close_plan(
         )
         return base
 
-    engage_mr = close_win and mr in ("fade_crowded_long", "fade_crowded_short")
+    engage_mr = close_win and RegimeOutput.is_active(RegimeState.NO_SIGNAL)
     monitor_struct = (pre or close_win) and not cal.get("blackout_new_positions_suggested")
 
     if engage_mr:

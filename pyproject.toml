@@ -20,6 +20,8 @@ dependencies = [
     "structlog",
     "tenacity",
     "python-dotenv",
+    "fastparquet>=2026.5.0",
+    "pyarrow>=24.0.0",
 ]
 
 # Flat repo: explicit discovery avoids treating ``bias_detector/`` as a second

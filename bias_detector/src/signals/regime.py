@@ -36,16 +36,19 @@ class RegimeState(Enum):
 
 @dataclass
 class RegimeConfig:
-    # CCI thresholds
-    cci_strong:  float = 1.5   # |cci_z| above this = strong directional regime
-    cci_weak:    float = 0.8   # |cci_z| below this = neutral zone
+    # CCI thresholds. Positioning has a sweet spot — too neutral = no edge,
+    # too extreme = crowded mean-revert risk. Strength is U-shaped in |cci_z|.
+    cci_strong:  float = 1.0   # |cci_z| above this = strong directional regime
+    cci_weak:    float = 0.5   # |cci_z| below this = neutral zone
+    cci_taper:   float = 1.5   # |cci_z| above this = trim continuation scaling
+    cci_crowded: float = 1.75  # |cci_z| above this = asset-manager crowded → fade
 
     # Leveraged money
     lev_extreme: float = 2.0   # |lev_z| above this = crowded / squeeze risk
     lev_warning: float = 1.5   # |lev_z| above this = elevated crowding
 
     # Flow alignment
-    min_signal_strength: float = 0.35  # Below this threshold = weak signal, reduce size
+    min_signal_strength: float = 0.20  # Below this threshold = weak signal, reduce size
 
     # Position sizing multipliers
     scale_strong_confirmed: float = 1.5   # Strong regime + aligned flow
@@ -102,7 +105,7 @@ def classify_regime(
 
     # ── Gate 1: Data Quality ──────────────────────────────────────────────────
     quality_flag   = int(cot_row.get("quality_flag", 2))
-    is_roll_week   = bool(cot_row.get("is_roll_week", True))
+    is_roll_week   = bool(cot_row.get("is_roll_week", False))
     is_roll_trans  = bool(cot_row.get("is_roll_transition", True))
 
     if quality_flag == 2 or is_roll_trans:
@@ -139,17 +142,28 @@ def classify_regime(
     }
 
     # ── Gate 2: Squeeze Risk — highest priority after data quality ────────────
-    # Crowded positioning = high reversal risk regardless of direction
-    if is_crowded_long or is_crowded_short:
-        squeeze_direction = -1 if is_crowded_long else 1  # Fade the crowd
+    # Crowded positioning = high reversal risk regardless of direction.
+    # Trigger on either leveraged-money extreme (`lev_z`) OR asset-manager
+    # extreme (`cci_z`). Asset-manager crowding is slower but the dominant
+    # reversal driver in FX — missing it means doubling up at tops/bottoms.
+    cci_crowded_long  = cci_z >=  cfg.cci_crowded
+    cci_crowded_short = cci_z <= -cfg.cci_crowded
+    crowded_long  = is_crowded_long  or cci_crowded_long
+    crowded_short = is_crowded_short or cci_crowded_short
+
+    if crowded_long or crowded_short:
+        squeeze_direction = -1 if crowded_long else 1  # Fade the crowd
         multiplier = cfg.scale_squeeze
         if is_high_conc:
             multiplier *= cfg.conc_penalty
 
         log.warning("regime.squeeze_risk",
                     lev_z=round(lev_z, 3),
-                    crowded_long=is_crowded_long,
-                    crowded_short=is_crowded_short)
+                    cci_z=round(cci_z, 3),
+                    crowded_long=crowded_long,
+                    crowded_short=crowded_short,
+                    trigger="cci" if (cci_crowded_long or cci_crowded_short)
+                            and not (is_crowded_long or is_crowded_short) else "lev")
 
         return RegimeOutput(
             state=RegimeState.SQUEEZE_RISK,
@@ -194,9 +208,19 @@ def classify_regime(
         )
 
     # ── Gate 6: Regime Strength Classification ────────────────────────────────
-    if regime_confirmed and abs(cci_z) >= cfg.cci_strong:
+    # U-shape in |cci_z|: peak scaling sits in the "confirmed but not yet crowded"
+    # band [cci_strong, cci_taper). Above cci_taper we step back to base
+    # confirmed scaling — the crowded gate above already kicked in at cci_crowded.
+    abs_cci = abs(cci_z)
+
+    if regime_confirmed and cfg.cci_strong <= abs_cci < cfg.cci_taper:
         state      = RegimeState.BULL if bias_direction == 1 else RegimeState.BEAR
         multiplier = position_scale * cfg.scale_strong_confirmed
+
+    elif regime_confirmed and abs_cci >= cfg.cci_taper:
+        # Crowding-adjacent: keep direction but trim leverage back to base.
+        state      = RegimeState.BULL if bias_direction == 1 else RegimeState.BEAR
+        multiplier = position_scale * cfg.scale_confirmed
 
     elif regime_confirmed:
         state      = RegimeState.BULL if bias_direction == 1 else RegimeState.BEAR
