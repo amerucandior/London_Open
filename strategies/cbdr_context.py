@@ -31,8 +31,13 @@ def _reference_ny_date_for_cbdr(anchor_utc: datetime) -> date:
     return t.date() - timedelta(days=1)
 
 
-def load_cbdr_m5_dataframe(symbol: str, ny_date: date) -> pd.DataFrame:
-    """M5 bars from NY ``ny_date`` 14:00 to 20:00 (America/New_York), ``time`` column UTC."""
+def load_cbdr_m5_dataframe(symbol: str, ny_date: date) -> tuple[pd.DataFrame, float]:
+    """M5 bars from NY ``ny_date`` 14:00 to 20:00 (America/New_York), ``time`` column UTC.
+
+    Returns ``(df, pip_size)``. ``pip_size`` is fetched in the same MT5Connection
+    context — otherwise ``mt5.symbol_info`` returns ``None`` after the terminal
+    has been shut down by the context-manager exit.
+    """
     ny = ZoneInfo("America/New_York")
     start_ny = datetime(ny_date.year, ny_date.month, ny_date.day, 14, 0, tzinfo=ny)
     end_ny = datetime(ny_date.year, ny_date.month, ny_date.day, 20, 0, tzinfo=ny)
@@ -41,6 +46,16 @@ def load_cbdr_m5_dataframe(symbol: str, ny_date: date) -> pd.DataFrame:
 
     with MT5Connection() as conn:
         raw = conn.copy_rates_range(symbol, mt5.TIMEFRAME_M5, start_utc, end_utc)
+        info = conn.symbol_info(symbol)
+        if info is None:
+            # Symbol may not yet be in Market Watch. Selecting forces it in,
+            # which is enough for symbol_info to return a populated record.
+            try:
+                mt5.symbol_select(symbol, True)
+            except Exception:
+                pass
+            info = conn.symbol_info(symbol)
+        pip_size = float(info.point) if info is not None and getattr(info, "point", None) else 1e-5
 
     if raw is None or len(raw) == 0:
         raise RuntimeError(
@@ -51,7 +66,7 @@ def load_cbdr_m5_dataframe(symbol: str, ny_date: date) -> pd.DataFrame:
     df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
     for col in ("open", "high", "low", "close"):
         df[col] = df[col].astype(float)
-    return df[["time", "open", "high", "low", "close"]]
+    return df[["time", "open", "high", "low", "close"]], pip_size
 
 
 def cbdr_block_for_london_open(
@@ -75,7 +90,7 @@ def cbdr_block_for_london_open(
         }
     try:
         ny_d = _reference_ny_date_for_cbdr(anchor_utc)
-        df = load_cbdr_m5_dataframe(symbol, ny_d)
+        df, pip_size = load_cbdr_m5_dataframe(symbol, ny_d)
         raw = cbdr_mod.cbdr_range(
             df,
             symbol,
@@ -83,6 +98,7 @@ def cbdr_block_for_london_open(
             ideal_min=float(cfg.get("ideal_min_pips", 20)),
             ideal_max=float(cfg.get("ideal_max_pips", 30)),
             max_allowed=float(cfg.get("max_allowed_pips", 40)),
+            pip_size=pip_size,
         )
         proj = cbdr_mod.lod_hod_projection(raw, direction_bias)
         return {

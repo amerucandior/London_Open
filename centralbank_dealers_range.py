@@ -10,7 +10,7 @@ the band); bearish → **HoD** (levels above). See ``lod_hod_projection``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 try:
     import MetaTrader5 as mt5
@@ -29,6 +29,7 @@ def cbdr_range(
     ideal_min: float = 20,
     ideal_max: float = 30,
     max_allowed: float = 40,
+    pip_size: Optional[float] = None,
 ) -> dict[str, Any]:
     """
     CBDR for one day: NY 14:00–20:00 on the dates already contained in ``df``.
@@ -74,10 +75,15 @@ def cbdr_range(
     cbdr_low = float(window["body_low"].min())
     range_price = cbdr_high - cbdr_low
 
-    info = mt5.symbol_info(symbol)
-    if info is None:
-        raise RuntimeError(f"MT5 symbol_info is None for {symbol!r}")
-    pip_size = float(info.point) or 1e-5
+    # Prefer the pip_size passed by the caller — it was fetched while the MT5
+    # connection was still open. Falling back to symbol_info() after the
+    # MT5Connection context has exited returns None and breaks the calculation.
+    if pip_size is None:
+        info = mt5.symbol_info(symbol)
+        if info is None:
+            raise RuntimeError(f"MT5 symbol_info is None for {symbol!r}")
+        pip_size = float(info.point) or 1e-5
+    pip_size = float(pip_size) or 1e-5
     cbdr_range_pips = range_price / pip_size
 
     within_ideal_range = ideal_min <= cbdr_range_pips <= ideal_max
