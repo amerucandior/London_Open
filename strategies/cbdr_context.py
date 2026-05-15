@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 import centralbank_dealers_range as cbdr_mod
 import config
+from utils import HAS_MT5
 from utils.mt5_utils import MT5Connection
 
 
@@ -65,6 +66,13 @@ def cbdr_block_for_london_open(
     Returns ``{"ok": False, "error": ...}`` on failure so callers can still return a plan.
     """
     cfg = config.config.get("cbdr", {})
+    if not HAS_MT5:
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "no_mt5_dev_env",
+            "reference_ny_date": None,
+        }
     try:
         ny_d = _reference_ny_date_for_cbdr(anchor_utc)
         df = load_cbdr_m5_dataframe(symbol, ny_d)

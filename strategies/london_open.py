@@ -18,13 +18,19 @@ import config
 import session
 from ingestion.cot import get_latest_cot
 from signals.regime import classify_regime, RegimeOutput
+from utils import HAS_MT5
 
 
 def _asian_block(pair: str, now_local: datetime) -> dict[str, Any]:
+    # Dev environments without MetaTrader5 (Linux/Mac) skip price-feed paths
+    # rather than raising every run. The Windows trading box has HAS_MT5=True.
+    if not HAS_MT5:
+        return {"ok": False, "skipped": True, "reason": "no_mt5_dev_env", "source": None}
     try:
         rng = asian_range.get_today_asian_range(pair, on=now_local)
         width = float(rng["high"]) - float(rng["low"])
         return {
+            "ok": True,
             "high": rng["high"],
             "low": rng["low"],
             "mid": rng["mid"],
@@ -36,7 +42,7 @@ def _asian_block(pair: str, now_local: datetime) -> dict[str, Any]:
             "source": "mt5_session_clock_asian",
         }
     except Exception as exc:
-        return {"error": str(exc), "source": "mt5_unavailable_or_range_failed"}
+        return {"ok": False, "error": str(exc), "source": "mt5_unavailable_or_range_failed"}
 
 
 def _breakout_rules(
@@ -61,7 +67,8 @@ def _breakout_rules(
         "cbdr_confluence": (
             "Full CBDR + 1σ/2σ HoD/LoD prices live under top-level ``cbdr_lod_hod`` when ``ok``."
             if cbdr_payload.get("ok")
-            else cbdr_payload.get("error", "cbdr_unavailable")
+            else cbdr_payload.get("reason")
+                 or cbdr_payload.get("error", "cbdr_unavailable")
         ),
     }
     return rules
