@@ -37,9 +37,11 @@ def _make_bars(
     })
 
 
-def _fake_symbol_info(point: float = 0.00001):
+def _fake_symbol_info(point: float = 0.00001, digits: int = 5):
+    """Default = 5-digit EURUSD broker. 1 pip = point * 10 = 0.0001."""
     info = MagicMock()
     info.point = point
+    info.digits = digits
     return info
 
 
@@ -48,16 +50,17 @@ def _fake_symbol_info(point: float = 0.00001):
 
 class TestCbdrRange:
     def test_basic_body_range(self):
-        df = _make_bars(close_=1.1003)
+        # 25 actual pips body range on a 5-digit EURUSD feed.
+        df = _make_bars(close_=1.1025)
         with patch("centralbank_dealers_range.mt5") as mock_mt5:
             mock_mt5.symbol_info.return_value = _fake_symbol_info()
             result = cbdr_range(df, "EURUSD")
 
-        # body high = max(open, close) = 1.1003, body low = min(open, close) = 1.1000
-        assert result["cbdr_high"] == pytest.approx(1.1003, abs=1e-6)
+        # body high = max(open, close) = 1.1025, body low = min(open, close) = 1.1000
+        assert result["cbdr_high"] == pytest.approx(1.1025, abs=1e-6)
         assert result["cbdr_low"] == pytest.approx(1.1000, abs=1e-6)
-        assert result["cbdr_range_pips"] == pytest.approx(30.0, abs=0.1)  # 0.0003 / 0.00001 = 30 pips
-        assert result["within_ideal"] is True  # 30 pips within 20-30
+        assert result["cbdr_range_pips"] == pytest.approx(25.0, abs=0.1)  # 0.0025 / 0.0001 = 25 pips
+        assert result["within_ideal"] is True  # 25 pips within 20-30
 
     def test_wick_mode(self):
         df = _make_bars(high_add=0.0010, low_sub=0.0010)

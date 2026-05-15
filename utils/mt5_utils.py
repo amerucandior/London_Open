@@ -48,6 +48,24 @@ class MT5Connection:
         return mt5.order_send(request)
 
 
+def pip_size_from_info(info: Any) -> float:
+    """Return the price increment of 1 pip for an MT5 ``symbol_info``.
+
+    MT5 reports ``point`` = smallest tick. On 3- and 5-digit quotes (modern
+    retail FX), 1 pip = 10 points. On legacy 2- and 4-digit quotes, 1 pip = 1
+    point. Using ``info.point`` directly as a pip size makes EURUSD reads come
+    back 10× too large (e.g. a 7.7-pip CBDR getting logged as "77 pips").
+    """
+    if info is None:
+        return 0.0001
+    digits = int(getattr(info, "digits", 5) or 5)
+    point = float(getattr(info, "point", 0.0) or 0.0)
+    if point <= 0.0:
+        # Fall back to digits-derived guess so callers don't divide by zero.
+        return 10 ** -(digits - 1) if digits >= 2 else 0.0001
+    return point * 10 if digits in (3, 5) else point
+
+
 def _calc_asian_stats(rates) -> tuple[float, float, float]:
     high = float(rates["high"].max())
     low = float(rates["low"].min())

@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 import centralbank_dealers_range as cbdr_mod
 import config
 from utils import HAS_MT5
-from utils.mt5_utils import MT5Connection
+from utils.mt5_utils import MT5Connection, pip_size_from_info
 
 
 def _reference_ny_date_for_cbdr(anchor_utc: datetime) -> date:
@@ -55,7 +55,7 @@ def load_cbdr_m5_dataframe(symbol: str, ny_date: date) -> tuple[pd.DataFrame, fl
             except Exception:
                 pass
             info = conn.symbol_info(symbol)
-        pip_size = float(info.point) if info is not None and getattr(info, "point", None) else 1e-5
+        pip_size = pip_size_from_info(info)
 
     if raw is None or len(raw) == 0:
         raise RuntimeError(

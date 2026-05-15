@@ -78,12 +78,15 @@ def cbdr_range(
     # Prefer the pip_size passed by the caller — it was fetched while the MT5
     # connection was still open. Falling back to symbol_info() after the
     # MT5Connection context has exited returns None and breaks the calculation.
+    # NOTE: pip_size means "1 pip in price units" (0.0001 for EURUSD), NOT
+    # ``info.point`` (0.00001 for 5-digit brokers).
     if pip_size is None:
         info = mt5.symbol_info(symbol)
         if info is None:
             raise RuntimeError(f"MT5 symbol_info is None for {symbol!r}")
-        pip_size = float(info.point) or 1e-5
-    pip_size = float(pip_size) or 1e-5
+        from utils.mt5_utils import pip_size_from_info
+        pip_size = pip_size_from_info(info)
+    pip_size = float(pip_size) or 0.0001
     cbdr_range_pips = range_price / pip_size
 
     within_ideal_range = ideal_min <= cbdr_range_pips <= ideal_max
