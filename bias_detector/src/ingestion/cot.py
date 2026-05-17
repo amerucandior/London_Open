@@ -399,18 +399,17 @@ def _check_staleness(
         lambda d: 0 if d <= threshold else (2 if d > (threshold + 7) else 1)
     )
 
-    # Logging
-    stale_count = (df["quality_flag"] > 0).sum()
-    if stale_count > 0:
-        max_days = int(df["days_old"].max())
-        avg_days = float(df["days_old"].mean())
+    # Warn only when the *most recent* record is stale. Counting historical
+    # records older than `threshold` measures the lookback window length, not
+    # data freshness — a 2yr window naturally contains records up to ~730 days
+    # old. Latest record = minimum days_old (smallest gap from today).
+    latest_days_old = int(df["days_old"].min())
+    if latest_days_old > threshold:
         log.warning(
             "cot.stale_data_detected",
-            stale_records=int(stale_count),
-            max_days_old=max_days,
-            avg_days_old=round(avg_days, 1),
+            latest_days_old=latest_days_old,
             threshold=threshold,
-            reference_tuesday=str(last_tuesday)
+            reference_tuesday=str(last_tuesday),
         )
 
     return df

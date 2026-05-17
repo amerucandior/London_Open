@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
 try:
@@ -40,10 +41,20 @@ def _parse_args() -> argparse.Namespace:
         metavar="PATH",
         help="SQLite state file path (default: runtime_state.sqlite)",
     )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable DEBUG-level logging (per-bar skip reasons, etc.)",
+    )
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
     watchlist = [(pair.upper(), TIMEFRAME) for pair in args.pairs]
-    main(watchlist=watchlist, db_path=args.db, poll_seconds=args.poll)
+    main(
+        watchlist=watchlist,
+        db_path=args.db,
+        poll_seconds=args.poll,
+        log_level=logging.DEBUG if args.debug else logging.INFO,
+    )

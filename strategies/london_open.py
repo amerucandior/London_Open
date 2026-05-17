@@ -169,8 +169,12 @@ def london_open_plan(
         )
         return base
 
-    adjusted = round(base_lot_size * regime.position_multiplier, 2)
-    stop_mult = 0.7 if regime.state.value in ("SQUEEZE_RISK", "NEUTRAL") else 1.0
+    # In crowded / mixed regimes we de-risk via size, not via a tighter stop:
+    # tighter stops in squeeze regimes get bled out by the noise around the
+    # structural level (opposite side of the Asian range). Keep the stop
+    # where price structure dictates and shrink the lot instead.
+    regime_size_haircut = 0.7 if regime.state.value in ("SQUEEZE_RISK", "NEUTRAL") else 1.0
+    lot_size = round(base_lot_size * regime.position_multiplier * regime_size_haircut, 2)
 
     base.update(
         cot_regime=_regime_dict(regime),
@@ -178,8 +182,7 @@ def london_open_plan(
         trade=True,
         reason="armed_for_breakout_scan",
         direction_bias=regime.direction,
-        lot_size=adjusted,
-        stop_multiplier=stop_mult,
+        lot_size=lot_size,
         signal_strength=float(row.get("signal_strength", 0.0)),
     )
     return base

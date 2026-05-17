@@ -57,6 +57,12 @@ def _handle_open_breakout(bar: Bar, store: StateStore, risk: RiskGate) -> None:
     plan = london_open_plan(bar.symbol)
 
     if not plan.get("trade"):
+        log.debug(
+            "open_breakout: skipped %s — reason=%s armed=%s",
+            bar.symbol,
+            plan.get("reason"),
+            plan.get("setup_armed"),
+        )
         return
 
     asian = plan.get("asian_range", {})
@@ -75,12 +81,19 @@ def _handle_open_breakout(bar: Bar, store: StateStore, risk: RiskGate) -> None:
         return  # bar closed inside range — no breakout yet
 
     # Only trade in COT bias direction when a directional bias is present.
-    bias = plan.get("direction_bias")
-    if bias and bias != side:
-        log.info("open_breakout: skipping %s %s — COT bias is %s", bar.symbol, side, bias)
+    # `bias` is an integer (+1 long / -1 short / 0 flat); `side` is "LONG"/"SHORT".
+    # Comparing int to str was always not-equal — silently rejecting every
+    # confirmed-regime trade. Map side to its directional integer first.
+    bias = plan.get("direction_bias") or 0
+    side_dir = 1 if side == "LONG" else -1
+    if bias != 0 and bias != side_dir:
+        log.info(
+            "open_breakout: skipping %s %s — COT bias is %s",
+            bar.symbol, side, bias,
+        )
         return
 
-    lots = round(float(plan.get("lot_size", 1.0)) * float(plan.get("stop_multiplier", 1.0)), 2)
+    lots = round(float(plan.get("lot_size", 1.0)), 2)
 
     verdict = risk.check(bar.symbol, lots)
     if not verdict.allowed:
@@ -117,6 +130,11 @@ def _handle_close_mr(bar: Bar, store: StateStore, risk: RiskGate) -> None:
     plan = london_close_plan(bar.symbol)
 
     if not plan.get("engage_mean_reversion_leg"):
+        log.debug(
+            "close_mr: skipped %s — playbook=%s",
+            bar.symbol,
+            plan.get("playbook"),
+        )
         return
 
     # Fade direction from COT mean reversion hint.
@@ -198,9 +216,10 @@ def main(
     watchlist: list[tuple[str, int]] | None = None,
     db_path: str = "runtime_state.sqlite",
     poll_seconds: float = 2.0,
+    log_level: int = logging.INFO,
 ) -> None:
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     if watchlist is None:
