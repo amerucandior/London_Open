@@ -121,7 +121,11 @@ def london_close_plan(
         return base
 
     # Engage MR only when COT has flagged a crowded position to fade.
-       engage_mr = close_win and mr in ("fade_crowded_long", "fade_crowded_short")
+    # A prior refactor used ``RegimeOutput.is_active(RegimeState.NO_SIGNAL)``,
+    # which called an instance method with an enum member as ``self`` and raised
+    # ``AttributeError: 'RegimeState' object has no attribute 'state'`` inside
+    # the 16:00–17:00 close window — silently killing every close-MR trade.
+    engage_mr = close_win and mr in ("fade_crowded_long", "fade_crowded_short")
     monitor_struct = (pre or close_win) and not cal.get("blackout_new_positions_suggested")
 
     if engage_mr:
