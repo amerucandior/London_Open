@@ -16,3 +16,5 @@ wheels/
 data/
 .ff_last_request
 ff_calendar_cache.json
+
+cot_EURUSD_2026_lb2.parquet
