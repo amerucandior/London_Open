@@ -29,6 +29,16 @@ def _now_utc_iso() -> str:
 
 
 # ------------------------------------------------------------------ public API
+def get_filling_mode(conn, pair: str) -> int:
+    info = conn.symbol_info(pair)
+    if info is None:
+        return mt5.ORDER_FILLING_IOC  # fallback
+    filling = info.filling_mode
+    if filling & 1:
+        return mt5.ORDER_FILLING_FOK
+    if filling & 2:
+        return mt5.ORDER_FILLING_IOC
+    return mt5.ORDER_FILLING_RETURN
 
 def place_bracket_order(
     *,
@@ -67,7 +77,7 @@ def place_bracket_order(
             "magic":        202600,
             "comment":      comment or strategy,
             "type_time":    mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": get_filling_mode(conn, pair),
         }
         if tp is not None:
             request["tp"] = tp
@@ -143,7 +153,7 @@ def close_position(ticket: int, pair: str, store: StateStore) -> bool:
             "magic":        202600,
             "comment":      "runtime_close",
             "type_time":    mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": get_filling_mode(conn, pair),
         }
         result = conn.order_send(request)
 
